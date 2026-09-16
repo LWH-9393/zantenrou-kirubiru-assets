@@ -80,6 +80,7 @@ const SPRITE_FILES = {
 function loadImage(path) {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    img.crossOrigin = "anonymous";
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`필수 이미지 자산을 불러오지 못했습니다: ${path}`));
     img.src = path;

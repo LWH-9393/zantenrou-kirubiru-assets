@@ -1,0 +1,675 @@
+{
+  "version": 2,
+  "frame": {
+    "image": "assets/img/ui_frame_atlas_v1.webp",
+    "size": [
+      1152,
+      768
+    ],
+    "cell": 384,
+    "frames": {
+      "statusRail": {
+        "cell": [
+          0,
+          0
+        ],
+        "rect": [
+          12,
+          147,
+          360,
+          89
+        ],
+        "sourceCell": [
+          0,
+          0,
+          572,
+          499
+        ],
+        "sourceVisibleBBox": [
+          21,
+          192,
+          528,
+          131
+        ],
+        "pixelSha256": "6e580ba060d9a94e945515fd52bb56ff14df9581f381452334670eee8e6fb16b"
+      },
+      "statusCrest": {
+        "cell": [
+          1,
+          0
+        ],
+        "rect": [
+          396,
+          111,
+          360,
+          162
+        ],
+        "sourceCell": [
+          572,
+          0,
+          473,
+          499
+        ],
+        "sourceVisibleBBox": [
+          41,
+          170,
+          392,
+          176
+        ],
+        "pixelSha256": "2245b7531fd041a38fbf37369ffa1047371bfbdaac03476b606cdc9979b4d76a"
+      },
+      "weaponFrame": {
+        "cell": [
+          2,
+          0
+        ],
+        "rect": [
+          830,
+          12,
+          259,
+          360
+        ],
+        "sourceCell": [
+          1045,
+          0,
+          491,
+          499
+        ],
+        "sourceVisibleBBox": [
+          101,
+          63,
+          276,
+          384
+        ],
+        "pixelSha256": "ce7e70f508b3e2e88335b51b0854da728512cde22be86b47169e266ccbd43979"
+      },
+      "forgeFrame": {
+        "cell": [
+          0,
+          1
+        ],
+        "rect": [
+          59,
+          396,
+          265,
+          360
+        ],
+        "sourceCell": [
+          0,
+          499,
+          572,
+          525
+        ],
+        "sourceVisibleBBox": [
+          138,
+          52,
+          299,
+          406
+        ],
+        "pixelSha256": "5e9250c933a6e5322f5c2b31b3a6e0d71920853f677b4814dbb25c89a6f67ed5"
+      },
+      "stageOrnament": {
+        "cell": [
+          1,
+          1
+        ],
+        "rect": [
+          396,
+          530,
+          360,
+          92
+        ],
+        "sourceCell": [
+          572,
+          499,
+          473,
+          525
+        ],
+        "sourceVisibleBBox": [
+          24,
+          215,
+          415,
+          106
+        ],
+        "pixelSha256": "31b2cfa5344097273dbccc5d2d2f90b6cdfbcdc12df6af5f29be095aa429016f"
+      },
+      "selectionAura": {
+        "cell": [
+          2,
+          1
+        ],
+        "rect": [
+          780,
+          487,
+          360,
+          177
+        ],
+        "sourceCell": [
+          1045,
+          499,
+          491,
+          525
+        ],
+        "sourceVisibleBBox": [
+          30,
+          156,
+          420,
+          206
+        ],
+        "pixelSha256": "f268203a7bfb350ff7c9f4fdad5c163799139586021ad2cbc237428c479689cf"
+      }
+    },
+    "sliceGrid": {
+      "statusRail": {
+        "x": [
+          0,
+          70,
+          290,
+          360
+        ],
+        "xStretch": [
+          1
+        ],
+        "y": [
+          0,
+          89
+        ],
+        "yStretch": []
+      },
+      "weaponFrame": {
+        "x": [
+          0,
+          82,
+          104,
+          155,
+          177,
+          259
+        ],
+        "xStretch": [
+          1,
+          3
+        ],
+        "y": [
+          0,
+          84,
+          156,
+          204,
+          276,
+          360
+        ],
+        "yStretch": [
+          1,
+          3
+        ],
+        "fill": [
+          82,
+          84,
+          95,
+          192
+        ],
+        "borderOnly": true
+      },
+      "forgeFrame": {
+        "x": [
+          0,
+          76,
+          101,
+          164,
+          189,
+          265
+        ],
+        "xStretch": [
+          1,
+          3
+        ],
+        "y": [
+          0,
+          78,
+          287,
+          360
+        ],
+        "yStretch": [
+          1
+        ],
+        "fill": [
+          76,
+          78,
+          113,
+          209
+        ],
+        "borderOnly": true
+      },
+      "stageOrnament": {
+        "x": [
+          0,
+          82,
+          278,
+          360
+        ],
+        "xStretch": [
+          0,
+          2
+        ],
+        "y": [
+          0,
+          92
+        ],
+        "yStretch": []
+      }
+    },
+    "fitMode": {
+      "statusCrest": "contain",
+      "selectionAura": "contain"
+    }
+  },
+  "icon": {
+    "image": "assets/img/ui_icon_atlas_v1.webp",
+    "size": [
+      768,
+      768
+    ],
+    "cell": 192,
+    "icons": {
+      "hp": {
+        "cell": [
+          0,
+          0
+        ],
+        "rect": [
+          12,
+          22,
+          168,
+          148
+        ],
+        "sourceCell": [
+          3,
+          3,
+          311,
+          312
+        ],
+        "sourceVisibleBBox": [
+          53,
+          81,
+          204,
+          180
+        ],
+        "pixelSha256": "19d27d334c6fe1522d4fa86431553a5cb8200fe5019b95d4d0bbb9b84d6cd8d7"
+      },
+      "guard": {
+        "cell": [
+          1,
+          0
+        ],
+        "rect": [
+          205,
+          12,
+          166,
+          168
+        ],
+        "sourceCell": [
+          314,
+          3,
+          311,
+          312
+        ],
+        "sourceVisibleBBox": [
+          58,
+          66,
+          199,
+          201
+        ],
+        "pixelSha256": "d9a43134ad5e84366bb60e12449327673d9a54cdc6da5defab32c9908cb4c6c8"
+      },
+      "mp": {
+        "cell": [
+          2,
+          0
+        ],
+        "rect": [
+          432,
+          12,
+          96,
+          168
+        ],
+        "sourceCell": [
+          625,
+          3,
+          311,
+          312
+        ],
+        "sourceVisibleBBox": [
+          90,
+          48,
+          131,
+          229
+        ],
+        "pixelSha256": "d9d22ab8a9ab5fd7c6230cafe8862a8c512adc4fcb9adfc3f5b97a5007801fc4"
+      },
+      "shards": {
+        "cell": [
+          3,
+          0
+        ],
+        "rect": [
+          600,
+          12,
+          143,
+          168
+        ],
+        "sourceCell": [
+          936,
+          3,
+          315,
+          312
+        ],
+        "sourceVisibleBBox": [
+          68,
+          63,
+          174,
+          204
+        ],
+        "pixelSha256": "ac54cc15e9698fdaf5ab1cf11e3be38b62e5b1cc6368d0e374dfe7859a346b4c"
+      },
+      "power": {
+        "cell": [
+          0,
+          1
+        ],
+        "rect": [
+          15,
+          204,
+          162,
+          168
+        ],
+        "sourceCell": [
+          3,
+          315,
+          311,
+          311
+        ],
+        "sourceVisibleBBox": [
+          55,
+          61,
+          201,
+          209
+        ],
+        "pixelSha256": "9c176b21a43ee689793b4ee4b975215171a54216520e6661f64fa1cc8c406f73"
+      },
+      "range": {
+        "cell": [
+          1,
+          1
+        ],
+        "rect": [
+          205,
+          204,
+          166,
+          168
+        ],
+        "sourceCell": [
+          314,
+          315,
+          311,
+          311
+        ],
+        "sourceVisibleBBox": [
+          46,
+          51,
+          224,
+          227
+        ],
+        "pixelSha256": "09e4db5d2637bb429a8d85fe7fe3f11a2ebcb211c1e6f597ae346e6a32855501"
+      },
+      "speed": {
+        "cell": [
+          2,
+          1
+        ],
+        "rect": [
+          396,
+          207,
+          168,
+          161
+        ],
+        "sourceCell": [
+          625,
+          315,
+          311,
+          311
+        ],
+        "sourceVisibleBBox": [
+          56,
+          69,
+          210,
+          201
+        ],
+        "pixelSha256": "a7b6c8b8570284a6054e1f20602dd62acc2d966755761902ed0378b2b31b3844"
+      },
+      "skill": {
+        "cell": [
+          3,
+          1
+        ],
+        "rect": [
+          602,
+          204,
+          139,
+          168
+        ],
+        "sourceCell": [
+          936,
+          315,
+          315,
+          311
+        ],
+        "sourceVisibleBBox": [
+          55,
+          48,
+          190,
+          230
+        ],
+        "pixelSha256": "e405afa462054ae5c14069feaf5826a10e194f060aadbefec6800ba5bf0ce59f"
+      },
+      "lock": {
+        "cell": [
+          0,
+          2
+        ],
+        "rect": [
+          34,
+          396,
+          124,
+          168
+        ],
+        "sourceCell": [
+          3,
+          626,
+          311,
+          312
+        ],
+        "sourceVisibleBBox": [
+          72,
+          48,
+          157,
+          213
+        ],
+        "pixelSha256": "1e9c4a038e995f731bf651aab74a9866b8b34c186571646fdb135c1ddb9562e4"
+      },
+      "reroll": {
+        "cell": [
+          1,
+          2
+        ],
+        "rect": [
+          210,
+          396,
+          156,
+          168
+        ],
+        "sourceCell": [
+          314,
+          626,
+          311,
+          312
+        ],
+        "sourceVisibleBBox": [
+          62,
+          63,
+          175,
+          189
+        ],
+        "pixelSha256": "72444b9e9a70c34c0686d78bfcc2510378b3515e0c2f3565184e35e9d3d973b7"
+      },
+      "common": {
+        "cell": [
+          2,
+          2
+        ],
+        "rect": [
+          405,
+          396,
+          150,
+          168
+        ],
+        "sourceCell": [
+          625,
+          626,
+          311,
+          312
+        ],
+        "sourceVisibleBBox": [
+          63,
+          69,
+          172,
+          192
+        ],
+        "pixelSha256": "8161ba5b7ebb821bda75c717984ddab541caeb78d909c4275104bc34e3746524"
+      },
+      "rare": {
+        "cell": [
+          3,
+          2
+        ],
+        "rect": [
+          588,
+          411,
+          168,
+          138
+        ],
+        "sourceCell": [
+          936,
+          626,
+          315,
+          312
+        ],
+        "sourceVisibleBBox": [
+          39,
+          67,
+          230,
+          189
+        ],
+        "pixelSha256": "ae89351c11bdd715ec64f31be3299ad5ef461f9889c931aa0f4adbd4549a05f1"
+      },
+      "epic": {
+        "cell": [
+          0,
+          3
+        ],
+        "rect": [
+          12,
+          591,
+          168,
+          162
+        ],
+        "sourceCell": [
+          3,
+          938,
+          311,
+          313
+        ],
+        "sourceVisibleBBox": [
+          43,
+          43,
+          218,
+          210
+        ],
+        "pixelSha256": "05ffd20a5a47338d515cd49a0423bcb65b96c468cf969284630195b6ca47ddae"
+      },
+      "stage": {
+        "cell": [
+          1,
+          3
+        ],
+        "rect": [
+          204,
+          618,
+          168,
+          107
+        ],
+        "sourceCell": [
+          314,
+          938,
+          311,
+          313
+        ],
+        "sourceVisibleBBox": [
+          24,
+          88,
+          254,
+          162
+        ],
+        "pixelSha256": "9e9e0bf4c08d3e301d3a4e481a021beab6e223c93fd01f56ae64b7a3aeb0c25e"
+      },
+      "combo": {
+        "cell": [
+          2,
+          3
+        ],
+        "rect": [
+          397,
+          588,
+          166,
+          168
+        ],
+        "sourceCell": [
+          625,
+          938,
+          311,
+          313
+        ],
+        "sourceVisibleBBox": [
+          36,
+          35,
+          234,
+          237
+        ],
+        "pixelSha256": "395feb00800a2dc80d879b6a74a36faabaf38f686cf86522476b8dc216ed106f"
+      },
+      "down": {
+        "cell": [
+          3,
+          3
+        ],
+        "rect": [
+          590,
+          588,
+          164,
+          168
+        ],
+        "sourceCell": [
+          936,
+          938,
+          315,
+          313
+        ],
+        "sourceVisibleBBox": [
+          70,
+          68,
+          170,
+          174
+        ],
+        "pixelSha256": "9d08c0c9d8973f10a29cffa491981ae665ebecab315c98bd37556caac3fe5c4d"
+      }
+    }
+  }
+}

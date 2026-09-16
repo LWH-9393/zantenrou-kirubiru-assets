@@ -1,0 +1,42 @@
+{
+  "image": "assets/img/forge_atlas.png",
+  "cols": 6,
+  "rows": 4,
+  "cell": 256,
+  "plate": {
+    "offset": 28,
+    "size": 200,
+    "radius": 24
+  },
+  "content": {
+    "offset": 16,
+    "size": 168
+  },
+  "display": {
+    "size": 80
+  },
+  "icons": {
+    "whet": [0, 0],
+    "opening": [1, 0],
+    "core": [2, 0],
+    "focus": [3, 0],
+    "haste": [4, 0],
+    "cleave": [5, 0],
+    "execute": [0, 1],
+    "sw_stone": [1, 1],
+    "sw_keen": [2, 1],
+    "sw_wave": [3, 1],
+    "kt_speed": [4, 1],
+    "kt_linger": [5, 1],
+    "kt_moon": [0, 2],
+    "ax_balance": [1, 2],
+    "ax_smash": [2, 2],
+    "ax_quake": [3, 2],
+    "sp_haft": [4, 2],
+    "sp_pierce": [5, 2],
+    "sp_drive": [0, 3],
+    "bw_light": [1, 3],
+    "bw_twin": [2, 3],
+    "bw_storm": [3, 3]
+  }
+}

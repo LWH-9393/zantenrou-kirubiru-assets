@@ -1,0 +1,85 @@
+:root {
+  color-scheme: dark;
+  --bg: #111827;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: #000;
+  color: white;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+}
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.game-column {
+  width: min(100vw, calc((100vh - 44px) * 4 / 3));
+  display: flex;
+  flex-direction: column;
+}
+
+.game-header {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--bg);
+  color: #e5e7eb;
+  font-size: 14px;
+}
+
+.game-header-title {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.mode-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-picker select {
+  background: #000;
+  color: white;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font: inherit;
+}
+
+.game-frame {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}

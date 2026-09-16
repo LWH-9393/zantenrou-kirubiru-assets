@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>하늘에서 몬스터가 떨어지는 날</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell" aria-label="하늘에서 몬스터가 떨어지는 날">
+      <div class="game-column">
+        <div class="game-frame">
+          <canvas id="game" width="640" height="480" aria-label="game canvas"></canvas>
+          <div id="boot-status" class="boot-status" aria-live="polite">
+            <div class="boot-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+            <p id="boot-title">밤하늘을 여는 중</p>
+            <div class="boot-progress" aria-hidden="true"><span id="boot-progress-fill"></span></div>
+            <small id="boot-detail">모험을 준비하고 있습니다</small>
+            <button id="boot-retry" type="button" hidden>다시 시도</button>
+          </div>
+          <div class="file-open-notice" aria-live="polite">
+            <div class="file-open-panel">
+              <h1>서버로 열어야 합니다</h1>
+              <p>이 화면은 여러 게임 파일을 불러오는 구조라 HTML 파일을 직접 열면 브라우저가 실행 파일을 차단합니다.</p>
+              <a href="http://127.0.0.1:5188/">http://127.0.0.1:5188/</a>
+            </div>
+          </div>
+          <!-- 터치 컨트롤은 전투 화면 위에 겹쳐 게임 비율을 보존한다. -->
+          <div id="touch" hidden>
+            <div class="tc-zone tc-left" aria-label="이동 조작">
+              <button class="tc-btn tc-jump" data-act="jump" aria-label="점프">
+                <span class="tc-atlas tc-atlas-jump" aria-hidden="true"></span><span>점프</span>
+              </button>
+              <button class="tc-btn tc-dir" data-act="left" aria-label="왼쪽 이동">
+                <span class="tc-symbol" aria-hidden="true">‹</span>
+              </button>
+              <button class="tc-btn tc-dir" data-act="right" aria-label="오른쪽 이동">
+                <span class="tc-symbol" aria-hidden="true">›</span>
+              </button>
+            </div>
+            <div class="tc-zone tc-right" aria-label="전투 조작">
+              <button class="tc-btn tc-guard" data-act="guard" aria-label="방어">
+                <span class="tc-atlas tc-atlas-guard" aria-hidden="true"></span><span>방어</span>
+              </button>
+              <button class="tc-btn tc-skill" data-act="skill" aria-label="기술">
+                <span class="tc-atlas tc-atlas-skill" aria-hidden="true"></span><span>기술</span>
+              </button>
+              <button class="tc-btn tc-attack" data-act="slash" aria-label="공격 및 확인">
+                <span class="tc-atlas tc-atlas-attack" aria-hidden="true"></span><span>공격</span>
+              </button>
+              <button class="tc-btn tc-aux" data-act="aux" aria-label="리롤권 사용">
+                <span class="tc-symbol tc-more-symbol" aria-hidden="true">↻</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- 순위 등록 이름 입력 -->
+    <div id="name-overlay" hidden>
+      <div class="name-panel">
+        <h2>순위 등록</h2>
+        <p>이름을 입력하세요 (최대 8자)</p>
+        <input id="name-field" type="text" maxlength="8" autocomplete="off" placeholder="무명">
+        <button id="name-submit">기록하기</button>
+      </div>
+    </div>
+
+    <script>
+      // Keep recovery outside the module graph: it must still work when
+      // main.js or one of its imports never finishes loading.
+      document.querySelector("#boot-retry")?.addEventListener("click", () => location.reload());
+      if (location.protocol === "file:") {
+        document.body.classList.add("file-open-mode");
+      } else {
+        const script = document.createElement("script");
+        script.type = "module";
+        script.src = "./src/main.js";
+        script.onerror = () => {
+          const status = document.querySelector("#boot-status");
+          const title = document.querySelector("#boot-title");
+          const detail = document.querySelector("#boot-detail");
+          const retry = document.querySelector("#boot-retry");
+          status?.classList.add("failed");
+          if (title) title.textContent = "게임을 불러오지 못했습니다";
+          if (detail) detail.textContent = "연결을 확인한 뒤 다시 시도해주세요";
+          if (retry) retry.hidden = false;
+        };
+        document.body.appendChild(script);
+      }
+    </script>
+  </body>
+</html>

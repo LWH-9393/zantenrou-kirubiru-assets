@@ -1,0 +1,168 @@
+[
+  {
+    "id": "whet",
+    "name": "날 갈기",
+    "rank": "common",
+    "maxStacks": 4,
+    "desc": "기본 공격력 +15% (최대 4회)"
+  },
+  {
+    "id": "opening",
+    "name": "개막",
+    "rank": "common",
+    "desc": "다음 스테이지부터 시작 시 MP +15"
+  },
+  {
+    "id": "core",
+    "name": "철심",
+    "rank": "common",
+    "desc": "가드 게이지 최대 +30"
+  },
+  {
+    "id": "focus",
+    "name": "집중",
+    "rank": "common",
+    "desc": "MP 회복 속도 +20%"
+  },
+  {
+    "id": "haste",
+    "name": "가속",
+    "rank": "common",
+    "maxStacks": 4,
+    "desc": "공격 속도 +15% (최대 4회)"
+  },
+  {
+    "id": "cleave",
+    "name": "양단",
+    "rank": "rare",
+    "unique": true,
+    "desc": "부위를 베면 양옆 부위에도 50 피해"
+  },
+  {
+    "id": "execute",
+    "name": "처형",
+    "rank": "epic",
+    "unique": true,
+    "desc": "체력 게이지가 빨간 적은 한 번에 처치"
+  },
+  {
+    "id": "sw_stone",
+    "name": "숫돌",
+    "rank": "common",
+    "weapon": "chokento",
+    "unique": true,
+    "desc": "정련이 3연타째 대신 2연타째 발동"
+  },
+  {
+    "id": "sw_keen",
+    "name": "예리한 날",
+    "rank": "rare",
+    "weapon": "chokento",
+    "unique": true,
+    "desc": "정련 공격력 2배 대신 3배"
+  },
+  {
+    "id": "sw_wave",
+    "name": "검기",
+    "rank": "epic",
+    "weapon": "chokento",
+    "unique": true,
+    "desc": "정련으로 파괴하면 바로 위 부위에 150 피해"
+  },
+  {
+    "id": "kt_speed",
+    "name": "빠른 칼놀림",
+    "rank": "common",
+    "weapon": "katana",
+    "unique": true,
+    "desc": "일본도 공격 속도 +10%"
+  },
+  {
+    "id": "kt_linger",
+    "name": "잔영",
+    "rank": "rare",
+    "weapon": "katana",
+    "unique": true,
+    "desc": "무월 지속시간 5초 대신 7초"
+  },
+  {
+    "id": "kt_moon",
+    "name": "달그림자",
+    "rank": "epic",
+    "weapon": "katana",
+    "unique": true,
+    "desc": "무월 중 콤보 1당 공격력 +2, 최대 +60"
+  },
+  {
+    "id": "ax_balance",
+    "name": "무게 중심",
+    "rank": "common",
+    "weapon": "axe",
+    "unique": true,
+    "desc": "도끼 후딜 0.62초 대신 0.52초"
+  },
+  {
+    "id": "ax_smash",
+    "name": "내려찍기",
+    "rank": "rare",
+    "weapon": "axe",
+    "unique": true,
+    "desc": "도끼 공격이 바로 아래 부위에 50% 피해"
+  },
+  {
+    "id": "ax_quake",
+    "name": "대지 울림",
+    "rank": "epic",
+    "weapon": "axe",
+    "unique": true,
+    "desc": "천지가르기가 아래쪽 4층 대신 5층을 무너뜨림"
+  },
+  {
+    "id": "sp_haft",
+    "name": "긴 자루",
+    "rank": "common",
+    "weapon": "spear",
+    "unique": true,
+    "desc": "창 사거리 +40"
+  },
+  {
+    "id": "sp_pierce",
+    "name": "꿰뚫기",
+    "rank": "rare",
+    "weapon": "spear",
+    "unique": true,
+    "desc": "위쪽 관통 피해 35 → 100 · 주표적 처치 시에도 관통"
+  },
+  {
+    "id": "sp_drive",
+    "name": "용의 기세",
+    "rank": "epic",
+    "weapon": "spear",
+    "unique": true,
+    "desc": "용승격이 낙하 거리 2.5초만큼 밀어내고 3초 동안 공격력 +50"
+  },
+  {
+    "id": "bw_light",
+    "name": "가벼운 화살",
+    "rank": "common",
+    "weapon": "bow",
+    "unique": true,
+    "desc": "화살 속도 +30%"
+  },
+  {
+    "id": "bw_twin",
+    "name": "쌍발",
+    "rank": "rare",
+    "weapon": "bow",
+    "unique": true,
+    "desc": "발사마다 12% 확률로 화살 1발 추가"
+  },
+  {
+    "id": "bw_storm",
+    "name": "폭풍 전야",
+    "rank": "epic",
+    "weapon": "bow",
+    "unique": true,
+    "desc": "화살비가 맨 위 2층 대신 4층을 공격"
+  }
+]

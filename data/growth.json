@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "maxHp",
+      "label": "최대 체력",
+      "baseValue": 100,
+      "valuePerLevel": 10,
+      "maxLevel": 3,
+      "costs": [150, 300, 500]
+    },
+    {
+      "id": "maxGuard",
+      "label": "최대 방어",
+      "baseValue": 100,
+      "valuePerLevel": 10,
+      "maxLevel": 3,
+      "costs": [150, 300, 500]
+    }
+  ]
+}

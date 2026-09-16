@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "reroll": {
+    "ticketPriceShards": 50,
+    "freePerRun": 2,
+    "carryLimit": 3,
+    "bossRefillAmount": 1,
+    "freeRerollCap": 2,
+    "consumeOrder": ["free", "purchased"]
+  },
+  "recovery": {
+    "staleAfterMs": 30000
+  }
+}

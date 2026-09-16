@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>斬るビル Web Port</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell" aria-label="斬るビル 웹 포트">
+      <div class="game-column">
+        <header class="game-header">
+          <span class="game-header-title">斬るビル</span>
+          <label class="mode-picker">
+            모드
+            <select id="modeSelect" aria-label="모드 선택">
+              <option value="" selected>タイトル</option>
+              <option value="act1">第一幕</option>
+              <option value="act2">第二幕</option>
+              <option value="endless">とことん</option>
+            </select>
+          </label>
+        </header>
+        <div class="game-frame">
+          <canvas id="game" width="640" height="480" aria-label="斬るビル game canvas"></canvas>
+        </div>
+      </div>
+    </main>
+    <script src="./vendor/Tone.js"></script>
+    <script src="./vendor/Midi.js"></script>
+    <script src="./src/bgmData.js"></script>
+    <script src="./src/game.js"></script>
+  </body>
+</html>

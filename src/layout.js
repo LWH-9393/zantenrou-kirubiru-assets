@@ -62,7 +62,8 @@ export function computeResponsiveLayout({
   const hudTargetScale = 0.98 + 0.22 * fluidScaleT;
 
   const sideMarginCss = Math.min(12, cssFrameWidth * 0.032);
-  const combatWidth = COMBAT_ENVELOPE_RIGHT - COMBAT_ENVELOPE_LEFT;
+  // Fit both weapon extremes around the middle lane without shifting the world.
+  const combatWidth = 2 * Math.max(-COMBAT_ENVELOPE_LEFT, COMBAT_ENVELOPE_RIGHT);
   const combatScale = Math.min(1, (cssFrameWidth - sideMarginCss * 2) / (combatWidth * cssScale));
   const trayHeightCss = touchVisible ? TOUCH_TRAY_CSS_H : 0;
   const groundY = Math.max(402, logicalHeight - 78);
@@ -70,13 +71,9 @@ export function computeResponsiveLayout({
     groundY * cssScale,
     cssFrameHeight - trayHeightCss - (COMBAT_FOOT_ALLOWANCE * combatScale * cssScale) - 12,
   );
-  // Centre the asymmetric weapon envelope only while the view needs fitting.
-  // Wide keyboard layouts remain byte-for-byte at the old world transform.
-  const envelopeCentre = (COMBAT_ENVELOPE_LEFT + COMBAT_ENVELOPE_RIGHT) / 2;
-  const fitWeight = clamp((1 - combatScale) / 0.1, 0, 1);
   const combatProjection = {
     scale: combatScale,
-    translateX: logicalWidth / 2 - (logicalWidth / 2 + envelopeCentre * fitWeight) * combatScale,
+    translateX: logicalWidth / 2 * (1 - combatScale),
     translateY: combatGroundCssY / cssScale - groundY * combatScale,
     groundCssY: combatGroundCssY,
     touchTrayCssHeight: trayHeightCss,

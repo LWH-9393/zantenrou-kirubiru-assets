@@ -1576,7 +1576,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     menuWash(0.5);
     text(title, cx, (landscape ? 34 : 45) * scale, { size: landscape ? 24 * scale : 27 * scale, font: SERIF, weight: 900, color: "#fff2d0", align: "center", spacing: 2 * scale });
     if (section !== "main") text(`파편 ${balance.toLocaleString("ko-KR")}`, cx, (landscape ? 58 : 77) * scale, { size: 14 * scale, color: "#b8d8ed", align: "center", weight: 700 });
-    let hero = null;
+    let hero = null, refreshGroup = null;
     if (section === "main") {
       const weaponId = weapon?.id || "chokento";
       const stack = mobile && !landscape;
@@ -1627,16 +1627,22 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       access("growth", navX, "성장", growth.map(item => `${item.name.replace("최대 ", "")} ${item.level}/${item.maxLevel}`), "hp");
       const canBuyTicket = canWrite && ticketPrice > 0 && balance >= ticketPrice;
       const purchaseLabel = !canWrite ? "저장 사용 불가" : canBuyTicket ? `구매 · ${ticketPrice} 파편` : `${ticketPrice} 파편 · ${Math.max(0, ticketPrice - balance)} 부족`;
-      access("tickets", navX + navCardW + navGap, "새로고침", [`보유 ${stock}회`, purchaseLabel], "reroll", !canBuyTicket);
+      const refreshX = navX + navCardW + navGap;
+      access("tickets", refreshX, "새로고침", [`보유 ${stock}회`, purchaseLabel], "reroll", !canBuyTicket);
       boxes.tickets.price = ticketPrice;
       boxes.tickets.purchaseCount = 1;
       boxes.tickets.label = purchaseLabel;
-      const carryY = navY + navH + (landscape ? 10 : 17) * scale;
-      text(`새로고침 - 구매 ${carried}/${limit}`, navX + 4 * scale, carryY + 21 * scale, { size: 14 * scale, weight: 800, color: "#d2e7f5" });
-      const rerollSummary = carried ? `새로고침 총 ${free + carried}회 · 무료 ${free} + 구매 ${carried}` : `무료 새로고침 ${free}회`;
-      text(rerollSummary, navX + 4 * scale, carryY + 48 * scale, { size: fitTextSize(rerollSummary, 13 * scale, navW - 8 * scale), color: MUTED });
-      boxes.carryLess = outlinedActionButton(navX + navW - 72 * scale, carryY + 16 * scale, 44 * scale, 44 * scale, "−", "preparation:carryLess", { selected: selected("carryLess"), disabled: !canWrite || carried <= 0, scale, fontSize: 22 });
-      boxes.carryMore = outlinedActionButton(navX + navW - 23 * scale, carryY + 16 * scale, 44 * scale, 44 * scale, "+", "preparation:carryMore", { selected: selected("carryMore"), disabled: !canWrite || carried >= Math.min(limit, stock), scale, fontSize: 22 });
+      const carryY = navY + navH + 6 * scale;
+      const refreshCx = refreshX + navCardW / 2;
+      // Keep the purchased-use selector with its stock and purchase action.
+      // Changing this quantity only reserves owned refreshes; it never buys one.
+      text("이번 모험", refreshCx, carryY + 15 * scale, { size: 11 * scale, color: MUTED, align: "center" });
+      text(`${carried}/${limit}회`, refreshCx, carryY + 34 * scale, { size: 15 * scale, weight: 800, color: "#d2e7f5", align: "center" });
+      boxes.carryLess = outlinedActionButton(refreshX + 22 * scale, carryY + 22 * scale, 44 * scale, 44 * scale, "−", "preparation:carryLess", { selected: selected("carryLess"), disabled: !canWrite || carried <= 0, scale, fontSize: 22 });
+      boxes.carryMore = outlinedActionButton(refreshX + navCardW - 22 * scale, carryY + 22 * scale, 44 * scale, 44 * scale, "+", "preparation:carryMore", { selected: selected("carryMore"), disabled: !canWrite || carried >= Math.min(limit, stock), scale, fontSize: 22 });
+      const rerollSummary = `무료 ${free}회 · 총 ${free + carried}회`;
+      text(rerollSummary, refreshCx, carryY + 65 * scale, { size: fitTextSize(rerollSummary, 12 * scale, navCardW - 8 * scale), color: MUTED, align: "center" });
+      refreshGroup = { x: refreshX, y: navY, w: navCardW, h: navH + 76 * scale };
       const footerCx = stack ? cx : navX + navW / 2;
       const footerY = stack || landscape ? H - (landscape ? 40 : 64) * scale : Math.min(H - 110 * scale, carryY + 152 * scale);
       const startLabel = assetsFailed ? "다시 불러오기" : !assetsReady ? "장비 준비 중" : "모험 시작";
@@ -1678,7 +1684,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       section, focusedIndex: focus, focusedId: focusOrder[focus] || null, focusOrder,
       balance, ticketStock: stock, carryTickets: carried, carryLimit: limit, freeRerolls: free,
       growthItems: growth.map(({ id, name, level, maxLevel, maxed, cost, canBuy }) => ({ id, name, level, maxLevel, maxed, cost, canBuy })),
-      boxes, hero, notice: (section === "main" ? saveError : saveError || notice) || null, saveError: saveError || null,
+      boxes, hero, refreshGroup, notice: (section === "main" ? saveError : saveError || notice) || null, saveError: saveError || null,
       canTransact: canWrite, enterT: Number(enterT) || 0, landscape,
       assetsReady, assetsLoading, assetsFailed,
     };

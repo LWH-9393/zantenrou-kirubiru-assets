@@ -1398,7 +1398,7 @@ export function createSceneMachine({
     else if (forgeState.advanceStageAfter) advanceToNextStage();
     else {
       run.respawnTimer = 1.5;
-      changeScene("run");
+      if (scene !== "run") changeScene("run");
     }
   }
 
@@ -1429,7 +1429,7 @@ export function createSceneMachine({
     run.respawnTimer = 0.5;
     const openingStacks = upgradeStack("opening");
     if (openingStacks > 0) gainMp(OPENING_MP_PER_STAGE * openingStacks);
-    changeScene("run");
+    if (scene !== "run") changeScene("run");
   }
 
   function finishRun(reason = run.deathCause === "debris" ? "death_debris" : "death_contact") {

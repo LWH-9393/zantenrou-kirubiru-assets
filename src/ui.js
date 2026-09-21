@@ -2465,10 +2465,10 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     let confirm;
     let failureBox = null;
     if (compactStack) {
-      confirm = primaryActionButton(startX + cardW - rerollW / 2, rerollY + 22 * scale, rerollW, 44 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: 16 });
+      confirm = primaryActionButton(startX + cardW - rerollW / 2, rerollY + 22 * scale, rerollW, 44 * scale, "강화 적용", "forge:confirm", { primary: true, scale, fontSize: 16 });
       if (failure) failureBox = { x: startX, y: cardBottom + 7 * scale, w: cardW, h: 17 * scale };
     } else if (landscape) {
-      confirm = primaryActionButton(cx, Math.min(cssHeight - 28, 345) * scale, 304 * scale, 48 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: 18 });
+      confirm = primaryActionButton(cx, Math.min(cssHeight - 28, 345) * scale, 304 * scale, 48 * scale, "강화 적용", "forge:confirm", { primary: true, scale, fontSize: 18 });
       if (failure) {
         const errorW = Math.max(150 * scale, (bounds.width - confirm.w) / 2 - 16 * scale);
         const y = cardBottom + 23 * scale;
@@ -2476,7 +2476,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
         failureBox = { x: bounds.left, y: y - 14 * scale, w: errorW, h: lastY - y + 17 * scale };
       }
     } else if (lowStack) {
-      confirm = primaryActionButton(startX + cardW - 132 * scale, rerollY + 22 * scale, 264 * scale, 48 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: 18 });
+      confirm = primaryActionButton(startX + cardW - 132 * scale, rerollY + 22 * scale, 264 * scale, 48 * scale, "강화 적용", "forge:confirm", { primary: true, scale, fontSize: 18 });
       if (failure) {
         text(failure, cx, cardBottom + 22 * scale, { size: 14 * scale, color: "#ffb2a8", align: "center", weight: 750 });
         failureBox = { x: startX, y: cardBottom + 8 * scale, w: cardW, h: 17 * scale };
@@ -2485,7 +2485,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       const failureWidth = Math.min(bounds.width - 32 * scale, 540 * scale);
       const failureLines = failure ? countLines(failure, failureWidth, 14 * scale, 750) : 1;
       const footerY = cardBottom + (58 + Math.max(0, failureLines - 1) * 18) * scale;
-      confirm = primaryActionButton(cx, footerY, Math.min(bounds.width - 48 * scale, 330 * scale), 56 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: mobile ? 18 : 20 });
+      confirm = primaryActionButton(cx, footerY, Math.min(bounds.width - 48 * scale, 330 * scale), 56 * scale, "강화 적용", "forge:confirm", { primary: true, scale, fontSize: mobile ? 18 : 20 });
       if (failure) {
         const lastY = wrapText(failure, cx, cardBottom + 22 * scale, failureWidth, 14 * scale, "#ffb2a8", 4 * scale, "center", 750);
         failureBox = { x: bounds.left + 16 * scale, y: cardBottom + 8 * scale, w: bounds.width - 32 * scale, h: lastY - cardBottom - 22 * scale + 17 * scale };

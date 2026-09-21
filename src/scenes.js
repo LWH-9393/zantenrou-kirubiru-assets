@@ -2055,7 +2055,7 @@ export function createSceneMachine({
       } else if (kind === "forge" && arg === "reroll") {
         tryReroll();
       } else if (kind === "forge" && arg === "confirm") {
-        confirmForge();
+        confirmForge("button");
       } else if (kind === "forge") {
         const i = Number(arg);
         if (!forgeState.cards[i]) return;
@@ -2132,7 +2132,10 @@ export function createSceneMachine({
     return true;
   }
 
-  function confirmForge() {
+  function confirmForge(source = "keyboard") {
+    // Touch gameplay's attack action must never act as a menu confirmation.
+    // On touch layouts only the explicit bottom button may spend an upgrade.
+    if (layout?.touchVisible && source !== "button") return;
     if (scene !== "forge" || fadeBusy() || run.pendingUpgrades <= 0) return;
     const card = forgeState.cards[forgeState.selected];
     if (!card) return;

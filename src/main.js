@@ -184,6 +184,7 @@ function bindTouch(onLayoutChange = () => {}) {
     const action = btn.dataset.act;
     const down = (e) => {
       e.preventDefault();
+      if (document.body.dataset.gameScene !== "run" || document.body.dataset.gamePaused === "true") return;
       unlock();
       if (!heldVirtual.has(action)) pressed.add(action);
       heldVirtual.add(action);

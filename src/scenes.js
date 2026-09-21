@@ -202,6 +202,11 @@ export function createSceneMachine({
     bestCombo: 0,
     comboIdleTimer: 0,
     shards: 0,
+    level: 1,
+    experience: 0,
+    totalExperience: 0,
+    pendingUpgrades: 0,
+    stageRewarded: false,
     rerollTickets: 0,
     freeRerolls: 0,
     purchasedRerolls: 0,
@@ -509,7 +514,32 @@ export function createSceneMachine({
     run.bestCombo = Math.max(run.bestCombo, run.combo);
     run.comboIdleTimer = 0;
     anim.comboPopT = 0;
-    if (run.combo > 0 && run.combo % 10 === 0) addShards(5);
+  }
+
+  function experienceRequired() {
+    return (stageCfg.experience?.initialRequired ?? 600)
+      + (run.level - 1) * (stageCfg.experience?.requiredIncrease ?? 200);
+  }
+
+  function experienceState() {
+    return { level: run.level, current: run.experience, required: experienceRequired(),
+      total: run.totalExperience, pendingUpgrades: run.pendingUpgrades };
+  }
+
+  // Only direct attack damage enters this path. Passing/guarding and the
+  // untouched cells removed by a row collapse never contribute experience.
+  function applyAttackDamage(cell, damage) {
+    if (!cell || cell.active === false || cell.hp <= 0) return { collapsed: false, damage: 0 };
+    const result = engine.applySlashDamage(cell, damage);
+    const actual = Math.max(0, result.hpBefore - result.hpAfter);
+    run.experience += actual;
+    run.totalExperience += actual;
+    while (run.experience >= experienceRequired()) {
+      run.experience -= experienceRequired();
+      run.level += 1;
+      run.pendingUpgrades += 1;
+    }
+    return { ...result, damage: actual };
   }
 
   function addShards(amount) {
@@ -620,6 +650,7 @@ export function createSceneMachine({
       shardMul: t.shardMul || 1,
       specials: t.specials || null,
       reward: t.reward || "forge",
+      clearShards: t.clearShards ?? 30,
     };
   }
 
@@ -629,6 +660,7 @@ export function createSceneMachine({
     run.buildingsInStage = run.plan.waves;
     run.buildingIndex = 0;
     run.stageBannerShown = false;
+    run.stageRewarded = false;
     audio.setMusicMode(run.plan.typeId === "boss" ? "boss" : "battle");
   }
 
@@ -755,22 +787,15 @@ export function createSceneMachine({
     addScore(cellGain);
     const floorGain = 300 + run.combo * 20;
     addScore(floorGain);
-    awardCollapseShards(floorMaterialType);
     return cellGain + floorGain;
   }
 
-  function awardCollapseShards(floorMaterialType) {
-    const info = engine.materialInfo[floorMaterialType];
-    addShards(Math.round(info.shard * (run.plan?.shardMul || 1)));
-  }
-
-  function awardSkillRows(removed, materialTypes = []) {
+  function awardSkillRows(removed) {
     if (removed <= 0) return 0;
     const gained = removed * 700 + run.combo * 30;
     addScore(gained);
     for (let row = 0; row < removed; row += 1) addCombo(1);
     run.floorsCollapsed += removed;
-    for (const materialType of materialTypes.slice(0, removed)) awardCollapseShards(materialType);
     return gained;
   }
 
@@ -811,7 +836,7 @@ export function createSceneMachine({
     const cell = floor.cells[lane];
     if (!cell || cell.hp <= 0) return false;
     const y = engine.floorWorldY(building, floor);
-    const result = engine.applySlashDamage(cell, damage);
+    const result = applyAttackDamage(cell, damage);
     cell.hitWeapon = run.weapon.id;
     const x = engine.BUILDING_X + lane * engine.LANE_W + engine.LANE_W / 2;
     fx.sparks(x, y + 58, 9, color);
@@ -840,7 +865,7 @@ export function createSceneMachine({
       const cell = target.floor.cells[lane];
       if (!cell || cell.hp <= 0) continue;
       const y = engine.floorWorldY(building, target.floor);
-      cell.hp = Math.max(0, cell.hp - BOMBER_DAMAGE);
+      applyAttackDamage(cell, BOMBER_DAMAGE);
       cell.flash = 0.2;
       fx.sparks(originX, y + 58, 12, "#ffb15c");
       fx.debris(originX, y + 58, 8, BOMBER_PALETTE);
@@ -848,27 +873,22 @@ export function createSceneMachine({
     }
   }
 
-  // "양단": graze splash to adjacent lanes (splash kills collapse the row).
-  function applyCleaveSplash(building, floorIndex, hitLane, floorY) {
-    if (upgradeStack("cleave") <= 0) return false;
-    const floor = building.floors[floorIndex];
-    if (!floor) return false;
+  // Resolve all splash targets before removing the row, even on a lethal
+  // main hit. Each real HP reduction counts once; collateral deletion does not.
+  function applyCleaveSplash(building, floor, hitLane, floorY) {
+    if (upgradeStack("cleave") <= 0) return -1;
+    let brokenLane = -1;
     for (const lane of [hitLane - 1, hitLane + 1]) {
       if (lane < 0 || lane >= engine.LANES) continue;
       const cell = floor.cells[lane];
       if (cell.hp <= 0) continue;
-      cell.hp = Math.max(0, cell.hp - CLEAVE_DAMAGE);
+      applyAttackDamage(cell, CLEAVE_DAMAGE);
       cell.flash = 0.2;
       const laneX = engine.BUILDING_X + lane * engine.LANE_W + engine.LANE_W / 2;
       fx.sparks(laneX, floorY + 60, 4, "#9fdcff");
-      if (cell.hp <= 0) {
-        const gained = onFloorCollapsed(cell.type);
-        engine.collapseFloor(building, floorIndex);
-        collapseFxAt(cell.type, laneX, floorY + 40, gained);
-        return true;
-      }
+      if (cell.hp <= 0 && brokenLane < 0) brokenLane = lane;
     }
-    return false;
+    return brokenLane;
   }
 
   function applyPierceAbove(building, above, lane) {
@@ -909,7 +929,8 @@ export function createSceneMachine({
     // Capture the row before any kill, cleave, or bomber removes array slots.
     // A spear thrust penetrates whether or not the main target survives.
     const pierceFloor = mainLane && run.weapon.pierce ? floorAtRowOffset(b, floor, -1) : null;
-    const result = engine.applySlashDamage(cell, damage);
+    const result = applyAttackDamage(cell, damage);
+    const splashBreak = mainLane ? applyCleaveSplash(b, floor, lane, floorY) : -1;
     const hitX = engine.BUILDING_X + lane * engine.LANE_W + engine.LANE_W / 2;
     const hitY = floorY + engine.ORIGINAL_ROW_HEIGHT - 34;
     if (mainLane) {
@@ -946,7 +967,7 @@ export function createSceneMachine({
     }
 
     onGrazeHit(hitX, hitY);
-    if (mainLane) applyCleaveSplash(b, index, lane, floorY);
+    if (splashBreak >= 0) collapseFloorByRef(b, floor, splashBreak, floorY);
 
     if (mainLane && smashFloor) {
       damageFloorCellByRef(b, smashFloor, lane, axeSmashDamage, "#ffc36a");
@@ -1236,8 +1257,8 @@ export function createSceneMachine({
         const idx = b.floors.indexOf(floor);
         if (idx === -1) continue;
         const fy = engine.floorWorldY(b, floor);
-        let collapsed = false;
-        for (let lane = 0; lane < engine.LANES && !collapsed; lane += 1) {
+        let brokenLane = -1;
+        for (let lane = 0; lane < engine.LANES; lane += 1) {
           const cell = floor.cells[lane];
           if (cell.hp <= 0) continue;
           const laneX = engine.BUILDING_X + lane * engine.LANE_W + engine.LANE_W / 2;
@@ -1246,14 +1267,14 @@ export function createSceneMachine({
             ARROW_RAIN_MIN_DAMAGE,
             Math.ceil(engine.cellMaxHp(cell) * ARROW_RAIN_MAX_HP_RATIO),
           );
-          cell.hp = Math.max(0, cell.hp - damage);
+          applyAttackDamage(cell, damage);
           cell.flash = 0.2;
-          if (cell.hp <= 0) {
-            awardCollapseShards(cell.type);
-            engine.collapseFloor(b, b.floors.indexOf(floor));
-            collapsedEvents.push({ materialType: cell.type, x: laneX, y: fy + 40 });
-            collapsed = true;
-          }
+          if (cell.hp <= 0 && brokenLane < 0) brokenLane = lane;
+        }
+        if (brokenLane >= 0) {
+          engine.collapseFloor(b, b.floors.indexOf(floor));
+          collapsedEvents.push({ materialType: floor.cells[brokenLane].type,
+            x: engine.BUILDING_X + (brokenLane + 0.5) * engine.LANE_W, y: fy + 40 });
         }
       }
       const gained = awardSkillRows(collapsedEvents.length);
@@ -1290,7 +1311,7 @@ export function createSceneMachine({
         for (let lane = 0; lane < floor.cells.length; lane += 1) {
           const cell = floor.cells[lane];
           if (cell.hp <= 0 || cell.active === false) continue;
-          cell.hp = Math.max(0, cell.hp - Math.ceil(engine.cellMaxHp(cell) * resistance));
+          applyAttackDamage(cell, Math.ceil(engine.cellMaxHp(cell) * resistance));
           cell.flash = 0.2;
           cell.hitWeapon = run.weapon.id;
           if (cell.hp <= 0 && brokenLane < 0) brokenLane = lane;
@@ -1308,11 +1329,13 @@ export function createSceneMachine({
     const collapsingFloors = b.floors.slice(b.floors.length - count);
     const bandYs = collapsingFloors
       .map((f) => engine.floorWorldY(b, f) + engine.ORIGINAL_ROW_HEIGHT / 2);
-    const materialTypes = collapsingFloors.map((floor) => (
-      floor.cells.find((cell) => cell.active !== false && cell.hp > 0)?.type ?? 0
-    ));
+    // Row-removing skills directly destroy each active cell. Credit its
+    // remaining HP before the engine removes the row.
+    for (const floor of collapsingFloors) {
+      for (const cell of floor.cells) applyAttackDamage(cell, cell.hp);
+    }
     const removed = engine.performWaza(b, rows);
-    const gained = awardSkillRows(removed, materialTypes);
+    const gained = awardSkillRows(removed);
 
     bandYs.forEach((y, i) => {
       fx.band(y, i * 0.05);
@@ -1327,11 +1350,6 @@ export function createSceneMachine({
 
   function afterBuildingCleared() {
     run.bossPattern = null;
-    addShards(10);
-    const cx = engine.BUILDING_X + engine.BUILDING_W / 2;
-    fx.crystals(cx, engine.GROUND_Y - 150, 7);
-    fx.dust(cx, engine.GROUND_Y - 60, 9);
-    fx.popup("몬스터 격파!  파편 +10", cx, engine.GROUND_Y - 190, { color: "#ffd98a", size: 18, life: 1.1 });
     sfx.cleared();
 
     run.buildingIndex += 1;
@@ -1339,29 +1357,49 @@ export function createSceneMachine({
     if (run.buildingIndex >= run.buildingsInStage) {
       resolveStageReward();
     } else {
-      run.respawnTimer = 1.5;
+      finishEncounter(false);
     }
   }
 
-  // 타입별 차등 보상: 보물=즉시 지급, 정예=희귀 보장, 보스=영웅 보장+회복
+  // Stage completion includes monsters that passed the player. Shards are
+  // awarded exactly once per stage; forging is earned only through damage XP.
   function resolveStageReward() {
+    if (run.stageRewarded) return;
+    run.stageRewarded = true;
     const reward = run.plan?.reward || "forge";
     const cx = engine.BUILDING_X + engine.BUILDING_W / 2;
+    const shards = run.plan?.clearShards ?? 30;
+    addShards(shards);
+    fx.crystals(cx, engine.GROUND_Y - 150, 7);
+    fx.popup(`스테이지 클리어 · 파편 +${shards}`, cx, engine.GROUND_Y - 190, { color: "#ffd98a", size: 18, life: 1.1 });
     if (reward === "treasure") {
-      addShards(30);
       healPlayer(10);
-      fx.crystals(cx, engine.GROUND_Y - 200, 10);
-      fx.popup("보물!  파편 +30", cx, engine.GROUND_Y - 240, { color: "#8fe3ff", size: 18, life: 1.2 });
-      advanceToNextStage();
-      return;
     }
     if (reward === "forgeEpic") {
       healPlayer(20);
-      addShards(20);
-      const rerollAdded = refillFreeRerolls();
-      fx.popup(rerollAdded > 0 ? "보스 격파!  무료 새로고침 +1" : "보스 격파!", cx, engine.GROUND_Y - 240, { color: "#ffd98a", size: 20, life: 1.2 });
+      refillFreeRerolls();
     }
-    goToForge(reward === "forgeEpic" ? "epic" : reward === "forgeRare" ? "rare" : null);
+    finishEncounter(true, reward === "forgeEpic" ? "epic" : reward === "forgeRare" ? "rare" : null);
+  }
+
+  function finishEncounter(advanceStage, minRank = null) {
+    // Projectiles from the completed monster must not hit the next one.
+    run.activeAttacks = [];
+    run.projectiles = [];
+    run.pendingAttack = null;
+    forgeState.advanceStageAfter = advanceStage;
+    forgeState.resumeCombat = false;
+    if (run.pendingUpgrades > 0) goToForge(minRank);
+    else resumeAfterForge();
+  }
+
+  function resumeAfterForge() {
+    if (forgeState.resumeCombat) changeScene("run");
+    else if (forgeState.advanceStageAfter) advanceToNextStage();
+    else {
+      run.respawnTimer = 1.5;
+      changeScene("run");
+    }
   }
 
   function healPlayer(amount) {
@@ -1375,6 +1413,7 @@ export function createSceneMachine({
   }
 
   function goToForge(minRank = null) {
+    input.reset?.();
     forgeState.minRank = minRank;
     forgeState.cards = rollForgeCards(minRank);
     forgeState.selected = 0;
@@ -1424,6 +1463,8 @@ export function createSceneMachine({
     saveError: profileAvailable ? "" : startupNotice,
   };
   const forgeState = {
+    advanceStageAfter: true,
+    resumeCombat: false,
     cards: [],
     selected: 0,
     enterT: 0,
@@ -1702,7 +1743,7 @@ export function createSceneMachine({
 
   function applyScene(next) {
     if (next !== "run" && paused) setPaused(false);
-    if (next !== "run") {
+    if (next !== "run" && !(next === "forge" && forgeState.resumeCombat)) {
       run.bossPattern = null;
       fx.clear();
       fx.setDangerActive?.(false);
@@ -1800,6 +1841,12 @@ export function createSceneMachine({
     run.bestCombo = 0;
     run.comboIdleTimer = 0;
     run.shards = 0;
+    run.level = 1;
+    run.experience = 0;
+    run.totalExperience = 0;
+    run.pendingUpgrades = 0;
+    forgeState.resumeCombat = false;
+    forgeState.advanceStageAfter = true;
     run.freeRerolls = activeEconomy.freeRerollsRemaining;
     run.purchasedRerolls = activeEconomy.purchasedTicketsRemaining;
     run.purchasedReserved = activeEconomy.purchasedTicketsReserved;
@@ -2086,11 +2133,15 @@ export function createSceneMachine({
   }
 
   function confirmForge() {
+    if (scene !== "forge" || fadeBusy() || run.pendingUpgrades <= 0) return;
     const card = forgeState.cards[forgeState.selected];
-    if (card) applyForgeCard(card);
+    if (!card) return;
+    applyForgeCard(card);
+    run.pendingUpgrades -= 1;
     run.lastUpgrade = card ? { name: card.name, until: run.elapsed + 4 } : null;
     sfx.forgePick();
-    advanceToNextStage();
+    if (run.pendingUpgrades > 0) goToForge(forgeState.minRank);
+    else resumeAfterForge();
   }
 
   // === Update ===
@@ -2123,13 +2174,13 @@ export function createSceneMachine({
         applyScene(fade.pending);
         fade.pending = null;
       }
-      fx.update(dt);
+      if (!(forgeState.resumeCombat && (scene === "forge" || fade.pending === "forge" || scene === "run"))) fx.update(dt);
       return;
     }
 
     if (scene === "run" && fx.consumeStop()) return; // hit-stop freeze frame
 
-    fx.update(dt);
+    if (scene !== "forge" || !forgeState.resumeCombat) fx.update(dt);
     if (scene === "title") return updateTitle();
     if (scene === "preparation") return updatePreparation(dt);
     if (scene === "weaponSelect") return updateWeaponSelect(dt);
@@ -2335,6 +2386,19 @@ export function createSceneMachine({
 
     updateProjectiles(dt);
     updateActiveAttacks(dt);
+
+    // Finish this frame's damage batch (including all splash targets), then
+    // freeze immediately. Surviving monsters, attacks and boss timers remain
+    // intact while the player chooses every earned upgrade.
+    if (run.pendingUpgrades > 0) {
+      if (run.building?.floors.length === 0) afterBuildingCleared();
+      else {
+        forgeState.resumeCombat = true;
+        forgeState.advanceStageAfter = false;
+        goToForge(run.plan?.reward === "forgeEpic" ? "epic" : run.plan?.reward === "forgeRare" ? "rare" : null);
+      }
+      return;
+    }
 
     if (run.building) {
       advanceMonster();
@@ -2632,6 +2696,8 @@ export function createSceneMachine({
         enterT: forgeState.enterT,
         t: clock,
         stage: run.stageIndex,
+        level: run.level,
+        pendingUpgrades: run.pendingUpgrades,
         rewardNote: forgeState.minRank === "rare"
           ? "정예 보상 — 희귀 이상 보장"
           : forgeState.minRank === "epic" ? "보스 보상 — 영웅 강화" : null,
@@ -2749,6 +2815,7 @@ export function createSceneMachine({
       comboIdleTimer: run.comboIdleTimer,
       shards: run.shards,
       stage: run.stageIndex,
+      experience: experienceState(),
       stageType: run.plan?.typeId || "normal",
       stageLabel: run.plan?.label || "일반",
       stageColor: run.plan?.color || "#ece6f4",
@@ -2918,6 +2985,12 @@ export function createSceneMachine({
         run.comboIdleTimer = 0;
         anim.comboPopT = 0;
       },
+      setExperience: ({ level = 1, current = 0, total = 0, pendingUpgrades = 0 } = {}) => {
+        run.level = Math.max(1, Math.floor(level));
+        run.experience = Math.max(0, Math.min(experienceRequired() - 1, current));
+        run.totalExperience = Math.max(run.experience, total);
+        run.pendingUpgrades = Math.max(0, Math.floor(pendingUpgrades));
+      },
       setWeapon: (id) => {
         const weapon = data.weapons.find((w) => w.id === id);
         if (!weapon) return false;
@@ -2989,9 +3062,15 @@ export function createSceneMachine({
         ]);
       },
       forceForge: (minRank = null) => {
+        run.pendingUpgrades = Math.max(1, run.pendingUpgrades);
+        forgeState.advanceStageAfter = true;
+        forgeState.resumeCombat = false;
         goToForge(minRank);
       },
       forceForgeCards: (ids, minRank = null) => {
+        run.pendingUpgrades = 1;
+        forgeState.advanceStageAfter = true;
+        forgeState.resumeCombat = false;
         const cards = ids
           .map((id) => data.upgrades.find((u) => u.id === id))
           .filter(Boolean);
@@ -3035,7 +3114,7 @@ export function createSceneMachine({
         run.building.holdFrames = 999999;
         return true;
       },
-      forceRewardStage: (typeId) => {
+      forceRewardStage: (typeId, { waveIndex = null } = {}) => {
         const type = STAGE_TYPES[typeId] || STAGE_TYPES.normal;
         run.plan = {
           typeId,
@@ -3051,9 +3130,12 @@ export function createSceneMachine({
           shardMul: type.shardMul || 1,
           specials: type.specials || null,
           reward: type.reward || "forge",
+          clearShards: type.clearShards ?? 30,
         };
+        run.stageRewarded = false;
         run.buildingsInStage = run.plan.waves;
-        run.buildingIndex = Math.max(0, run.buildingsInStage - 1);
+        run.buildingIndex = waveIndex === null ? Math.max(0, run.buildingsInStage - 1)
+          : Math.max(0, Math.min(run.buildingsInStage - 1, waveIndex));
         if (!run.building) spawnBuilding();
         changeScene("run");
       },
@@ -3331,6 +3413,7 @@ export function createSceneMachine({
       score: run.score,
       shards: run.shards,
       rerolls: run.rerollTickets,
+      experience: experienceState(),
       freeRerolls: run.freeRerolls,
       purchasedRerolls: run.purchasedRerolls,
       purchasedReserved: run.purchasedReserved,
@@ -3342,6 +3425,8 @@ export function createSceneMachine({
       waveIndex: run.buildingIndex,
       waveCount: run.buildingsInStage,
       forge: scene === "forge" ? {
+        resumeCombat: forgeState.resumeCombat,
+        pendingUpgrades: run.pendingUpgrades,
         minRank: forgeState.minRank,
         selected: forgeState.selected,
         rerolls: run.rerollTickets,

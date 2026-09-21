@@ -979,7 +979,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       left + 10 * scale,
       (mobile ? hasStageMeta ? 54 : 42 : s.boss ? 112 : stackedDesktop ? 72 : 56) * scale,
       statusUnits * scale,
-      (mobile ? 64 : 76) * scale,
+      (mobile ? 88 : 100) * scale,
     );
     const iconX = snapCssX(status.x + 14 * scale);
     const gaugeX = snapCssX(status.x + 61 * scale);
@@ -1022,6 +1022,13 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     text(`${Math.floor(s.mp)}/${s.mpMax}`, valueRight, snapCssY(mpCenterY + 1 * scale), {
       size: statusLabelSize, color: mpReady ? "#bce6ff" : "#b5c3d8", weight: 800, align: "right", baseline: "middle", stroke: true,
     });
+    const xp = s.experience || { level: 1, current: 0, required: 600, pendingUpgrades: 0 };
+    const experience = snapCssRect(status.x, status.y + (mobile ? 66 : 78) * scale, status.w, 20 * scale);
+    const xpY = snapCssY(experience.y + 10 * scale);
+    text("경험치", status.x + 3 * scale, xpY, { size: statusLabelSize, color: "#ffe2a3", weight: 850, baseline: "middle", stroke: true });
+    const xpGauge = snapCssRect(gaugeX, xpY - 4 * scale, gaugeW, 8 * scale);
+    bar(xpGauge.x, xpGauge.y, xpGauge.w, xpGauge.h, xp.current / Math.max(1, xp.required), "#b47b32", "#ffe4a1");
+    text(`Lv.${xp.level}`, valueRight, xpY, { size: 11 * scale, color: "#ffe2a3", weight: 900, align: "right", baseline: "middle", stroke: true });
     const mpStatus = mpReady ? `${s.skillName || "기술"} 준비` : s.mpPaused ? "공격 중 · 충전 대기" : "쉬는 중 · MP 충전";
     text(mpStatus, status.x + 31 * scale, status.y + status.h + 12 * scale, {
       size: statusLabelSize, color: mpReady ? "#bce6ff" : s.mpPaused ? "#b5c3d8" : "#9fdcff", weight: 800, stroke: true,
@@ -1057,7 +1064,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     let boss = null;
     if (s.boss) {
       const bossW = Math.min(bounds.width - 28 * scale, (mobile ? 282 : 322) * scale);
-      const bossY = (mobile ? (s.mugetsuT > 0 || s.spearRageT > 0 ? 157 : 140) : 64) * scale;
+      const bossY = (mobile ? (s.mugetsuT > 0 || s.spearRageT > 0 ? 181 : 164) : 64) * scale;
       boss = snapCssRect(centerX - bossW / 2, bossY, bossW, 43 * scale);
       hudWash(boss, { anchor: 0.5, strength: 0.76 });
       text(s.boss.name || "폭풍 구름", boss.x + 4 * scale, boss.y + 10 * scale, { size: 10.5 * scale, color: "#ffe2a3", weight: 900, stroke: true });
@@ -1125,7 +1132,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       const emphasis = !s.hazardActive && (s.comboCelebration || s.combo === tier.min);
       const comboScale = scale * (emphasis ? 0.76 : 0.52);
       const cx = snapCssX(right - 48 * scale);
-      const cy = snapCssY((mobile ? (s.boss ? 236 : 178) : stackedDesktop ? 206 : 184) * scale);
+      const cy = snapCssY((mobile ? (s.boss ? 260 : 178) : stackedDesktop ? 206 : 184) * scale);
       combo = snapCssRect(cx - 76 * comboScale, cy - 66 * comboScale, 152 * comboScale, 128 * comboScale);
       const impactDuration = comboAtlas?.impact?.frameDuration || 0.055;
       const impactTier = comboAtlas?.impact?.tiers?.find((candidate) => candidate.id === tier?.id);
@@ -1232,6 +1239,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     }
     metrics.hud = {
       status,
+      experience: { ...experience, ...xp, gauge: xpGauge },
       statusRows: {
         hp: { ...hpRow, iconX, gauge: hpGauge, valueRight },
         guard: { ...guardRow, iconX, gauge: guardGauge, valueRight },
@@ -2269,6 +2277,8 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     enterT,
     t,
     stage,
+    level = 1,
+    pendingUpgrades = 1,
     rewardNote,
     previewOf = null,
     canReroll = null,
@@ -2282,7 +2292,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     if (isShortLandscape() && !landscape) {
       return drawForgeLandscape({
         cards, selected, freeRerolls: freeCount, purchasedRerolls: purchasedCount,
-        stackOf, deniedT, enterT, t, stage, rewardNote, previewOf, canReroll,
+        stackOf, deniedT, enterT, t, stage, level, pendingUpgrades, rewardNote, previewOf, canReroll,
         reducedMotion, deniedReason, saveError,
       });
     }
@@ -2300,7 +2310,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     const cardW = mobile
       ? Math.min((lowStack ? 650 : 560) * scale, bounds.width - 28 * scale)
       : (bounds.width - (landscape ? 0 : 40 * scale) - gap * 2) / 3;
-    const stageText = "스테이지 " + (stage + 1) + " 클리어";
+    const stageText = `Lv.${level}` + (pendingUpgrades > 1 ? ` · 남은 강화 ${pendingUpgrades}회` : "");
     const rewardText = rewardNote || "하나를 골라 무기에 새긴다";
     const totalRerolls = freeCount + purchasedCount;
     const rerollDisabled = canReroll === null ? totalRerolls <= 0 : !canReroll;

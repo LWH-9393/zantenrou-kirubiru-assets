@@ -1,7 +1,9 @@
 {
   "cycleLength": 10,
+  "experience": { "initialRequired": 600, "requiredIncrease": 200 },
   "types": {
     "normal": {
+      "clearShards": 30,
       "label": "일반",
       "color": "#ece6f4",
       "waves": 1,
@@ -15,6 +17,7 @@
       "reward": "forge"
     },
     "rush": {
+      "clearShards": 40,
       "label": "급습",
       "color": "#8fd0ff",
       "waves": 2,
@@ -28,6 +31,7 @@
       "reward": "forge"
     },
     "armored": {
+      "clearShards": 40,
       "label": "철벽",
       "color": "#b48ae0",
       "waves": 1,
@@ -41,6 +45,7 @@
       "reward": "forge"
     },
     "elite": {
+      "clearShards": 50,
       "label": "정예",
       "color": "#ffd98a",
       "waves": 1,
@@ -54,6 +59,7 @@
       "reward": "forgeRare"
     },
     "treasure": {
+      "clearShards": 60,
       "label": "보물",
       "color": "#8fe3ff",
       "waves": 1,
@@ -67,6 +73,7 @@
       "reward": "treasure"
     },
     "boss": {
+      "clearShards": 80,
       "label": "보스",
       "color": "#ff8a8f",
       "waves": 1,

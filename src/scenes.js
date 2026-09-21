@@ -148,6 +148,7 @@ export function createSceneMachine({
   try { reducedMotion = localStorage.getItem(EFFECTS_KEY) === "reduced"; } catch { /* optional preference */ }
   fx.setIntensity?.(reducedMotion ? "reduced" : "normal");
   let paused = false;
+  const pauseMenu = { section: "main", index: 0, scrollOffset: 0 };
   let ensureGameplayAssets = () => Promise.resolve();
   let gameplayAssetsReady = () => true;
   let gameplayAssetsFailed = () => false;
@@ -163,6 +164,9 @@ export function createSceneMachine({
     const value = scene === "run" && Boolean(next);
     if (value === paused) return paused;
     paused = value;
+    pauseMenu.section = "main";
+    pauseMenu.index = 0;
+    pauseMenu.scrollOffset = 0;
     input.reset?.();
     audio.setPaused(paused);
     if (typeof document !== "undefined") document.body.dataset.gamePaused = String(paused);
@@ -269,7 +273,7 @@ export function createSceneMachine({
     if (run.economyManaged && run.activeRunId) {
       const saved = profileService.refillFreeReroll({ runId: run.activeRunId });
       if (!saved.ok) {
-        run.economySaveError = saved.error?.message || "무료 리롤을 저장하지 못했습니다";
+        run.economySaveError = saved.error?.message || "무료 새로고침을 저장하지 못했습니다";
         return 0;
       }
       profile = saved.profile;
@@ -371,6 +375,7 @@ export function createSceneMachine({
       return;
     }
     results.newlyUnlocked = newlyUnlocked;
+    results.newlyUnlockedIds = newlyUnlockedIds;
     results.committed = true;
     results.profileSaved = true;
     results.saveError = null;
@@ -1354,7 +1359,7 @@ export function createSceneMachine({
       healPlayer(20);
       addShards(20);
       const rerollAdded = refillFreeRerolls();
-      fx.popup(rerollAdded > 0 ? "보스 격파!  무료 리롤 +1" : "보스 격파!", cx, engine.GROUND_Y - 240, { color: "#ffd98a", size: 20, life: 1.2 });
+      fx.popup(rerollAdded > 0 ? "보스 격파!  무료 새로고침 +1" : "보스 격파!", cx, engine.GROUND_Y - 240, { color: "#ffd98a", size: 20, life: 1.2 });
     }
     goToForge(reward === "forgeEpic" ? "epic" : reward === "forgeRare" ? "rare" : null);
   }
@@ -1390,11 +1395,15 @@ export function createSceneMachine({
 
   function finishRun(reason = run.deathCause === "debris" ? "death_debris" : "death_contact") {
     run.bossPattern = null;
+    results.section = "main";
+    results.index = 0;
+    results.scrollOffset = 0;
     results.enterT = 0;
     results.registered = false;
     results.saveError = null;
     results.committed = false;
     results.newlyUnlocked = [];
+    results.newlyUnlockedIds = [];
     results.endReason = reason;
     results.settlement = null;
     results.bankBefore = profile.wallet?.shards || 0;
@@ -1423,18 +1432,22 @@ export function createSceneMachine({
     rerollOfferQueue: [],
   };
   const results = {
+    section: "main",
+    index: 0,
+    scrollOffset: 0,
     enterT: 0,
     registered: false,
     saveError: null,
     committed: false,
     newlyUnlocked: [],
+    newlyUnlockedIds: [],
     endReason: "death_contact",
     settlement: null,
     bankBefore: 0,
     profileSaved: null,
   };
-  const quitState = { active: false, origin: null, enterT: 0, index: 0 };
-  const rankingState = { entries: [], highlight: -1, enterT: 0 };
+  const quitState = { active: false, origin: null, returnToPause: false, enterT: 0, index: 0 };
+  const rankingState = { entries: [], highlight: -1, enterT: 0, returnScene: "title", scrollOffset: 0, revealHighlight: false };
 
   function applyForgeCard(card) {
     if (card.unique && upgradeStack(card.id) > 0) return;
@@ -1446,15 +1459,27 @@ export function createSceneMachine({
   }
 
   function openRanking(highlight = -1) {
+    rankingState.returnScene = scene === "results" ? "results" : "title";
     rankingState.entries = loadRankings();
     rankingState.highlight = highlight;
     rankingState.enterT = 0;
+    rankingState.scrollOffset = 0;
+    rankingState.revealHighlight = highlight >= 0;
     changeScene("ranking");
+  }
+
+  function closeRanking() {
+    sfx.uiMove();
+    changeScene(rankingState.returnScene);
   }
 
   function registerScore() {
     if (results.registered) return;
     nameEntry.open((name) => {
+      if (name === null) {
+        sfx.uiMove();
+        return;
+      }
       const finalName = name || "무명";
       const saved = saveRankingEntry({
         name: finalName,
@@ -1468,7 +1493,7 @@ export function createSceneMachine({
         ts: Date.now(),
       });
       if (!saved.saved) {
-        results.saveError = "기록을 저장하지 못했습니다. 다시 등록하거나 재도전할 수 있습니다.";
+        results.saveError = "순위 기록을 저장하지 못했습니다.";
         sfx.uiDeny();
         return;
       }
@@ -1496,6 +1521,7 @@ export function createSceneMachine({
   }
 
   function openPreparation(section = "main") {
+    requestGameplayAssets();
     refreshPreparationProfile();
     preparationState.section = section;
     preparationState.index = 0;
@@ -1503,7 +1529,7 @@ export function createSceneMachine({
     changeScene("preparation");
   }
 
-  function preparationSuccess(result, message) {
+  function preparationSuccess(result, message = "") {
     if (!acceptProfileResult(result)) return false;
     preparationState.notice = message;
     preparationState.saveError = "";
@@ -1536,7 +1562,7 @@ export function createSceneMachine({
       return false;
     }
     const selected = profileService.setWeapon(weapon.id);
-    if (!preparationSuccess(selected, `${weapon.name}을 다음 모험에 준비했습니다`)) {
+    if (!preparationSuccess(selected)) {
       sfx.uiDeny();
       return false;
     }
@@ -1557,7 +1583,7 @@ export function createSceneMachine({
       return false;
     }
     const result = profileService.setCarry(next);
-    if (!preparationSuccess(result, `다음 모험에 구매 리롤권 ${next}장을 가져갑니다`)) {
+    if (!preparationSuccess(result)) {
       sfx.uiDeny();
       return false;
     }
@@ -1587,7 +1613,7 @@ export function createSceneMachine({
       changeScene("weaponSelect");
       return;
     }
-    if (arg === "growth" || arg === "tickets") {
+    if (arg === "growth") {
       preparationState.section = arg;
       preparationState.index = 0;
       preparationState.notice = "";
@@ -1607,22 +1633,27 @@ export function createSceneMachine({
     if (arg === "carryMore") return void changeCarry(1);
     if (arg === "buyHp") return void buyPreparationGrowth("maxHp");
     if (arg === "buyGuard") return void buyPreparationGrowth("maxGuard");
-    if (arg === "buyTicket") {
+    if (arg === "tickets") {
       if (!profileAvailable) {
         sfx.uiDeny();
         return;
       }
       const result = profileService.buyTicket(1);
       if (!result.ok) {
-        acceptProfileResult(result, "리롤권 구매를 저장하지 못했습니다");
+        acceptProfileResult(result, "새로고침 구매를 저장하지 못했습니다");
         preparationState.notice = "";
         sfx.uiDeny();
         return;
       }
-      preparationSuccess(result, `리롤권 1장을 구매했습니다 · 보유 ${result.ticketBalance}장`);
+      preparationSuccess(result);
       return;
     }
     if (arg === "start") {
+      if (!gameplayAssetsReady()) {
+        requestGameplayAssets();
+        sfx.uiDeny();
+        return;
+      }
       if (beginRun()) sfx.uiConfirm();
       else sfx.uiDeny();
       return;
@@ -1637,6 +1668,7 @@ export function createSceneMachine({
     if (!run.player || !["run", "forge"].includes(origin)) return;
     quitState.active = true;
     quitState.origin = origin;
+    quitState.returnToPause = paused;
     quitState.enterT = 0;
     quitState.index = 0;
     if (origin === "run") setPaused(true);
@@ -1647,7 +1679,7 @@ export function createSceneMachine({
     const origin = quitState.origin;
     quitState.active = false;
     quitState.origin = null;
-    if (origin === "run") setPaused(false);
+    if (origin === "run") setPaused(quitState.returnToPause);
     sfx.uiMove();
   }
 
@@ -1827,7 +1859,98 @@ export function createSceneMachine({
     return (!fadeBusy() || paused) && ui.hitAt(x, y) !== null;
   }
 
+  function setPointer(x, y, down = false) {
+    ui.setPointer?.(x, y, down);
+  }
+
+  function activeScroll() {
+    if (quitState.active || (fadeBusy() && !paused)) return null;
+    const metrics = ui.metrics();
+    if (paused) return { state: pauseMenu, area: metrics.pause?.scroll };
+    if (scene === "results") return { state: results, area: metrics.results?.scroll };
+    if (scene === "ranking") return { state: rankingState, area: metrics.ranking?.scroll };
+    return null;
+  }
+
+  function canScrollAt(x, y) {
+    const area = activeScroll()?.area;
+    return Boolean(area?.maxOffset > 0 && x >= area.x && x <= area.x + area.w && y >= area.y && y <= area.y + area.h);
+  }
+
+  function scrollBy(delta) {
+    const current = activeScroll();
+    if (!current?.area || current.area.maxOffset <= 0) return false;
+    const offset = Math.max(0, Math.min(current.area.maxOffset, current.state.scrollOffset));
+    current.state.scrollOffset = Math.max(0, Math.min(current.area.maxOffset, offset + delta));
+    return true;
+  }
+
+  function scrollAt(x, y, delta) {
+    return canScrollAt(x, y) && scrollBy(delta);
+  }
+
+  function setPauseSection(section) {
+    pauseMenu.section = section;
+    pauseMenu.index = 0;
+    pauseMenu.scrollOffset = 0;
+    sfx.uiMove();
+  }
+
+  function handleResultsAction(arg, weaponId) {
+    if (arg === "details" || arg === "back") {
+      results.section = arg === "details" ? "details" : "main";
+      results.index = 0;
+      results.scrollOffset = 0;
+      sfx.uiMove();
+      return;
+    }
+    if (arg === "retrySave") {
+      commitRunResult();
+      if (results.committed) { results.index = 0; sfx.uiConfirm(); }
+      else sfx.uiDeny();
+      return;
+    }
+    if (!["retry", "newChallenge", "newWeapon", "primary"].includes(arg)) return;
+    if (!results.committed) { sfx.uiDeny(); return; }
+    if (arg === "retry") {
+      if (beginRun()) sfx.uiConfirm();
+      else sfx.uiDeny();
+    } else if (arg === "newChallenge") {
+      sfx.uiMove();
+      openPreparation("main");
+    } else if (arg === "newWeapon") {
+      const weapon = weaponId
+        ? data.weapons.find((item) => item.id === weaponId && results.newlyUnlockedIds.includes(item.id) && profile.unlocked.includes(item.id))
+        : newlyUnlockedWeapon();
+      if (!weapon || !profileAvailable) { sfx.uiDeny(); return; }
+      const selected = profileService.setWeapon(weapon.id);
+      if (!acceptProfileResult(selected, "새 무기를 준비하지 못했습니다")) {
+        results.saveError = preparationState.saveError;
+        sfx.uiDeny();
+        return;
+      }
+      run.weapon = weapon;
+      results.saveError = null;
+      preparationState.notice = "";
+      preparationState.saveError = "";
+      sfx.uiConfirm();
+      openPreparation("main");
+    } else if (results.registered) openRanking(-1);
+    else registerScore();
+  }
+
   function handleRegion(id) {
+    if (quitState.active && !id.startsWith("quit:")) return;
+    if (paused && !quitState.active && !id.startsWith("pause:") && !["system:motion", "system:mute", "system:pause"].includes(id)) return;
+    if (id === "pause:block" || id === "ranking:list") return;
+    if (id === "pause:back") {
+      setPauseSection(pauseMenu.section === "controls" ? "settings" : "main");
+      return;
+    }
+    if (["pause:upgrades", "pause:settings", "pause:controls"].includes(id)) {
+      setPauseSection(id.split(":")[1]);
+      return;
+    }
     if (id === "system:motion") {
       reducedMotion = !reducedMotion;
       fx.setIntensity?.(reducedMotion ? "reduced" : "normal");
@@ -1858,7 +1981,7 @@ export function createSceneMachine({
       audio.toggleMuted();
       return;
     }
-    const [kind, arg] = id.split(":");
+    const [kind, arg, detail] = id.split(":");
     if (scene === "title" && kind === "title") {
       const i = Number(arg);
       titleState.index = i;
@@ -1874,12 +1997,11 @@ export function createSceneMachine({
     } else if (scene === "weaponSelect" && kind === "weapon") {
       const i = Number(arg);
       const weapon = weaponViews()[i];
+      if (!weapon) return;
       if (weaponSelect.index !== i) {
         weaponSelect.index = i;
         sfx.uiMove();
-        return;
       }
-      selectPreparedWeapon();
     } else if (scene === "forge") {
       if (kind === "forge" && arg === "quit") {
         openQuitConfirmation("forge");
@@ -1889,38 +2011,28 @@ export function createSceneMachine({
         confirmForge();
       } else if (kind === "forge") {
         const i = Number(arg);
+        if (!forgeState.cards[i]) return;
         if (forgeState.selected !== i) {
           forgeState.selected = i;
           sfx.uiMove();
-          return;
         }
-        confirmForge();
       }
     } else if (scene === "results" && kind === "results") {
-      if (arg === "retrySave") {
-        commitRunResult();
-        if (results.committed) sfx.uiConfirm();
-        else sfx.uiDeny();
-      } else if (!results.committed) {
-        sfx.uiDeny();
-      } else if (arg === "retry") {
-        sfx.uiConfirm();
-        beginRun();
-      } else if (arg === "skip") {
-        sfx.uiMove();
-        openPreparation("main");
-      } else if (results.registered) openRanking(-1);
-      else registerScore();
-    } else if (scene === "ranking" && kind === "ranking") {
-      sfx.uiConfirm();
-      changeScene("title");
+      handleResultsAction(arg, detail);
+    } else if (scene === "ranking" && kind === "ranking" && arg === "back") {
+      closeRanking();
     }
+  }
+
+  function newlyUnlockedWeapon() {
+    const id = results.newlyUnlockedIds.find((weaponId) => profile.unlocked.includes(weaponId));
+    return data.weapons.find((weapon) => weapon.id === id) || null;
   }
 
   function tryReroll() {
     if (run.rerollTickets <= 0) {
       forgeState.rerollDenied = 0.5;
-      forgeState.rerollDeniedReason = "리롤권 없음";
+      forgeState.rerollDeniedReason = "새로고침 없음";
       sfx.uiDeny();
       return false;
     }
@@ -1948,7 +2060,7 @@ export function createSceneMachine({
         minRank: forgeState.minRank || null,
       });
       if (!saved.ok) {
-        run.economySaveError = saved.error?.message || "리롤권 사용을 저장하지 못했습니다";
+        run.economySaveError = saved.error?.message || "새로고침 사용을 저장하지 못했습니다";
         forgeState.rerollDenied = 0.5;
         forgeState.rerollDeniedReason = "저장 실패";
         sfx.uiDeny();
@@ -1967,6 +2079,7 @@ export function createSceneMachine({
     forgeState.cards = candidate;
     forgeState.selected = 0;
     forgeState.enterT = 0;
+    forgeState.rerollDenied = 0;
     forgeState.rerollDeniedReason = "";
     sfx.uiConfirm();
     return true;
@@ -2000,11 +2113,8 @@ export function createSceneMachine({
       else if (input.justPressed("skill") || input.justPressed("pause")) cancelQuitConfirmation();
       return;
     }
-    if (input.justPressed("pause")) setPaused(!paused);
-    if (paused) {
-      if (input.justPressed("skill") || input.justPressed("aux")) openQuitConfirmation("run");
-      return;
-    }
+    if (paused) return updatePauseMenu();
+    if (scene === "run" && input.justPressed("pause")) { setPaused(true); return; }
     clock += dt;
 
     if (fadeBusy()) {
@@ -2029,6 +2139,34 @@ export function createSceneMachine({
     if (scene === "ranking") return updateRanking(dt);
   }
 
+  function moveMenuFocus(state, order) {
+    const direction = input.justPressed("left") || input.justPressed("jump") ? -1
+      : input.justPressed("right") || input.justPressed("guard") ? 1 : 0;
+    if (!direction || !order.length) return;
+    state.index = (state.index + direction + order.length) % order.length;
+    sfx.uiMove();
+  }
+
+  function updatePauseMenu() {
+    const pausePressed = input.justPressed("pause");
+    const backPressed = input.justPressed("skill");
+    if (pausePressed || backPressed) {
+      if (pauseMenu.section !== "main") handleRegion("pause:back");
+      else if (pausePressed) setPaused(false);
+      else openQuitConfirmation("run");
+      return;
+    }
+    if (pauseMenu.section === "main" && input.justPressed("aux")) { openQuitConfirmation("run"); return; }
+    const metrics = ui.metrics().pause;
+    const order = metrics?.focusOrder || ["pause:resume", "pause:upgrades", "pause:settings", "pause:quit"];
+    if (["upgrades", "controls"].includes(pauseMenu.section)) {
+      const amount = metrics?.scroll?.rowHeight || 56 * (layout?.uiScale || 1);
+      if (input.justPressed("jump")) scrollBy(-amount);
+      if (input.justPressed("guard")) scrollBy(amount);
+    } else moveMenuFocus(pauseMenu, order);
+    if (input.justPressed("slash")) handleRegion(order[pauseMenu.index] || order[0]);
+  }
+
   function updateTitle() {
     const move = (dir) => {
       const next = Math.max(0, Math.min(1, titleState.index + dir));
@@ -2051,7 +2189,6 @@ export function createSceneMachine({
     const orders = {
       main: ["weapon", "growth", "tickets", "carryLess", "carryMore", "start", "back"],
       growth: ["buyHp", "buyGuard", "home"],
-      tickets: ["buyTicket", "home"],
     };
     const order = orders[preparationState.section] || orders.main;
     const move = (delta) => {
@@ -2073,7 +2210,7 @@ export function createSceneMachine({
   function updateWeaponSelect(dt) {
     weaponSelect.enterT += dt;
     weaponSelect.deniedT = Math.max(0, weaponSelect.deniedT - dt);
-    const columns = engine.W <= engine.BASE_W + 4 && engine.H > 700 ? 2 : data.weapons.length;
+    const columns = data.weapons.length;
     const moveTo = (next) => {
       const clamped = Math.max(0, Math.min(data.weapons.length - 1, next));
       if (clamped === weaponSelect.index) return;
@@ -2086,7 +2223,7 @@ export function createSceneMachine({
       moveTo(Math.max(rowStart, Math.min(rowEnd, weaponSelect.index + dir)));
     };
     const moveVertical = (dir) => {
-      moveTo(weaponSelect.index + dir * columns);
+      moveTo(weaponSelect.index + dir);
     };
     if (input.justPressed("left")) moveHorizontal(-1);
     if (input.justPressed("right")) moveHorizontal(1);
@@ -2347,10 +2484,10 @@ export function createSceneMachine({
     if (run.lastUpgrade && run.elapsed < run.lastUpgrade.until) return `${run.lastUpgrade.name} 강화 적용`;
     if (run.bossPattern?.hazards.length) return "표시된 레인을 피해 이동하거나 방어하세요";
     if (run.stageIndex > 2 || profile.runs > 2) return null;
-    if (run.mp >= run.weapon.mpCost) return "기술 준비 완료 · K 또는 기술 버튼";
-    if (run.mpPause > 0 && run.elapsed > 5) return "공격을 쉬면 기술 게이지가 충전됩니다";
-    if (run.elapsed < 5) return layout?.touchVisible ? "좌우 이동 · 공격을 누르고 있으면 연속 공격" : "A D 이동 · J 공격 · W 점프 · S 방어 · K 기술";
-    return "약한 몸통 한 칸을 깨면 가로 한 줄이 무너집니다";
+    if (run.mp >= run.weapon.mpCost) return layout?.touchVisible ? "기술 준비 완료 · 기술 버튼" : "기술 준비 완료 · K";
+    if (run.mpPause > 0 && run.elapsed > 5) return "공격을 쉬면 기술 게이지 충전";
+    if (run.elapsed < 5) return layout?.touchVisible ? "좌우 이동 · 공격을 누르면 연속 공격" : "A D 이동 · J 공격 · W 점프 · S 방어 · K 기술";
+    return "한 칸을 깨면 몸통 한 줄이 무너집니다";
   }
 
   function laneVisualX(p) {
@@ -2368,7 +2505,6 @@ export function createSceneMachine({
   function updateForge(dt) {
     forgeState.enterT += dt;
     forgeState.rerollDenied = Math.max(0, forgeState.rerollDenied - dt);
-    if (forgeState.rerollDenied <= 0) forgeState.rerollDeniedReason = "";
     const selectPrev = input.justPressed("jump") || input.justPressed("left");
     const selectNext = input.justPressed("guard") || input.justPressed("right");
     if (selectPrev && forgeState.selected > 0) {
@@ -2387,27 +2523,37 @@ export function createSceneMachine({
   function updateResults(dt) {
     results.enterT += dt;
     if (results.enterT < 0.5) return;
-    if (input.justPressed("slash")) {
-      if (!results.committed) commitRunResult();
-      else if (results.registered) openRanking(-1);
-      else registerScore();
+    if (results.section === "details") {
+      const amount = ui.metrics().results?.scroll?.rowHeight || 54 * (layout?.uiScale || 1);
+      if (input.justPressed("jump")) scrollBy(-amount);
+      if (input.justPressed("guard")) scrollBy(amount);
+      if (input.justPressed("slash") || input.justPressed("skill") || input.justPressed("pause")) handleResultsAction("back");
+      return;
     }
-    if (input.justPressed("skill")) {
-      sfx.uiMove();
-      if (results.committed) openPreparation("main");
-      else sfx.uiDeny();
+    const order = ui.metrics().results?.focusOrder || [results.committed ? "results:retry" : "results:retrySave", "results:newChallenge", "results:primary", "results:details"];
+    const previousIndex = results.index;
+    moveMenuFocus(results, order);
+    if (results.index !== previousIndex) {
+      const metrics = ui.metrics().results;
+      const area = metrics?.scroll;
+      const reward = metrics?.newWeapons?.find(item => item.action?.id === order[results.index]);
+      if (area?.maxOffset > 0 && reward) {
+        if (reward.y < area.y) scrollBy(reward.y - area.y);
+        else if (reward.y + reward.h > area.y + area.h) scrollBy(reward.y + reward.h - area.y - area.h);
+      }
     }
-    if (input.justPressed("aux")) {
-      if (results.committed && beginRun()) sfx.uiConfirm();
-      else sfx.uiDeny();
-    }
+    if (input.justPressed("slash")) handleRegion(order[results.index] || order[0]);
+    else if (input.justPressed("skill")) handleResultsAction("newChallenge");
+    else if (input.justPressed("aux")) handleResultsAction("retry");
   }
 
   function updateRanking(dt) {
     rankingState.enterT += dt;
+    const amount = ui.metrics().ranking?.scroll?.rowHeight || 56 * (layout?.uiScale || 1);
+    if (input.justPressed("jump")) scrollBy(-amount);
+    if (input.justPressed("guard")) scrollBy(amount);
     if (input.justPressed("slash") || input.justPressed("skill")) {
-      sfx.uiConfirm();
-      changeScene("title");
+      closeRanking();
     }
   }
 
@@ -2453,6 +2599,10 @@ export function createSceneMachine({
         saveError: preparationState.saveError,
         canTransact: profileAvailable,
         enterT: preparationState.enterT,
+        t: reducedMotion ? 0 : clock,
+        assetsReady: gameplayAssetsReady(),
+        assetsLoading: !gameplayAssetsReady() && !gameplayAssetsFailed(),
+        assetsFailed: gameplayAssetsFailed(),
       });
     } else if (scene === "weaponSelect") {
       ui.drawWeaponSelect({
@@ -2478,6 +2628,7 @@ export function createSceneMachine({
         stackOf: upgradeStack,
         deniedT: forgeState.rerollDenied,
         deniedReason: forgeState.rerollDeniedReason,
+        saveError: run.economySaveError,
         enterT: forgeState.enterT,
         t: clock,
         stage: run.stageIndex,
@@ -2490,6 +2641,10 @@ export function createSceneMachine({
       });
     } else if (scene === "results") {
       ui.drawResults({
+        section: results.section,
+        focusedIndex: results.index,
+        scrollOffset: results.scrollOffset,
+        unlockedWeapons: results.newlyUnlockedIds.map((id) => data.weapons.find((weapon) => weapon.id === id && profile.unlocked.includes(id))).filter(Boolean),
         score: run.score,
         bestCombo: run.bestCombo,
         floors: run.floorsCollapsed,
@@ -2499,6 +2654,8 @@ export function createSceneMachine({
         attacks: run.attackCount,
         skills: run.skillCount,
         unlocked: results.newlyUnlocked,
+        newlyUnlockedIds: results.newlyUnlockedIds,
+        newWeapon: newlyUnlockedWeapon(),
         registered: results.registered,
         saveError: results.saveError,
         profileSaved: results.profileSaved,
@@ -2510,21 +2667,36 @@ export function createSceneMachine({
         bankBefore: results.bankBefore,
         bankAfter: results.settlement?.shardBalance ?? results.bankBefore,
         returnedTickets: results.settlement?.returnedTickets ?? 0,
+        settlementPending: !results.committed,
         settlementError: results.committed ? "" : results.saveError,
         enterT: results.enterT,
       });
     } else if (scene === "ranking") {
       ui.drawRanking({
+        scrollOffset: rankingState.scrollOffset,
         entries: rankingState.entries,
         highlight: rankingState.highlight,
         enterT: rankingState.enterT,
       });
+      if (rankingState.revealHighlight) {
+        const area = ui.metrics().ranking?.scroll;
+        rankingState.revealHighlight = false;
+        if (area) {
+          rankingState.scrollOffset = Math.max(0, Math.min(area.maxOffset, (rankingState.highlight + 1) * area.rowHeight - area.h));
+          if (rankingState.scrollOffset > 0) return render();
+        }
+      }
     }
 
     fx.renderScreen(ctx, W, H);
     ui.vignette();
     if (paused) ui.fadeOverlay(fadeAlpha());
-    if (paused) ui.drawPauseOverlay?.({
+    if (paused && !quitState.active) ui.drawPauseOverlay?.({
+      section: pauseMenu.section,
+      focusedIndex: pauseMenu.index,
+      scrollOffset: pauseMenu.scrollOffset,
+      muted: audio.state().muted,
+      touchInput: layout?.coarsePointer === true,
       upgrades: currentUpgrades(), weaponName: run.weapon.name,
       stats: { power: slashDamage(), range: attackRange(), speed: Number((1 / attackCooldown()).toFixed(1)) },
       reducedMotion,
@@ -2951,12 +3123,17 @@ export function createSceneMachine({
     return JSON.stringify({
       scene,
       paused,
+      pauseMenu: paused ? { ...pauseMenu } : null,
+      ranking: scene === "ranking" ? { returnScene: rankingState.returnScene, scrollOffset: rankingState.scrollOffset } : null,
       elapsed: Number(run.elapsed.toFixed(3)),
       effects: { reducedMotion },
       deathCause: run.deathCause,
       coordinateSystem: "logical canvas pixels; origin top-left; +x right; +y down",
       quitConfirm: quitState.active ? { origin: quitState.origin, shards: run.shards } : null,
       results: scene === "results" ? {
+        section: results.section,
+        focusedIndex: results.index,
+        scrollOffset: results.scrollOffset,
         registered: results.registered,
         saveError: results.saveError,
         profileSaved: results.profileSaved,
@@ -2965,6 +3142,8 @@ export function createSceneMachine({
         reason: results.endReason,
         settlement: results.settlement ? { ...results.settlement } : null,
         bankBefore: results.bankBefore,
+        newlyUnlockedIds: [...results.newlyUnlockedIds],
+        newWeaponId: newlyUnlockedWeapon()?.id || null,
       } : null,
       audio: audio.state(),
       profile: {
@@ -3168,6 +3347,8 @@ export function createSceneMachine({
         rerolls: run.rerollTickets,
         freeRerolls: run.freeRerolls,
         purchasedRerolls: run.purchasedRerolls,
+        deniedReason: forgeState.rerollDeniedReason || null,
+        saveError: run.economySaveError,
         cards: forgeState.cards.map((card) => ({
           id: card.id,
           name: card.name,
@@ -3204,5 +3385,5 @@ export function createSceneMachine({
     return true;
   }
 
-  return { update, render, click, hoverHit, resize, textState, setGameplayAssetsReady, setPaused, abandonRun };
+  return { update, render, click, hoverHit, setPointer, canScrollAt, scrollAt, resize, textState, setGameplayAssetsReady, setPaused, abandonRun };
 }

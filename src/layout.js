@@ -54,6 +54,18 @@ export function computeResponsiveLayout({
 
   const portrait = mode === "mobile"
     || (mode === "compact" && cssFrameHeight > cssFrameWidth * 1.05);
+  // Menu composition follows the space available to its content, independently
+  // of the combat/HUD orientation contract. The former compact-width cap left
+  // only 496 CSS px at 800x800 while still selecting three-column menus.
+  const menuSafeWidth = mode === "mobile"
+    ? Math.min(baseWidth, visibleLogicalWidth)
+    : Math.min(1280, Math.max(baseWidth, visibleLogicalWidth - 32 / cssScale));
+  const menuAvailableCssWidth = Math.min(menuSafeWidth, visibleLogicalWidth) * cssScale;
+  const shortLandscape = !portrait && cssFrameWidth >= 640
+    && cssFrameHeight <= 500 && frameAspect >= 1.45;
+  // Three comparison cards need at least 272 CSS px each plus their spacing.
+  // Short landscape uses its own low-height composition instead of stacking.
+  const menuPortrait = portrait || (!shortLandscape && menuAvailableCssWidth < 900);
   // The geometric mean reacts to both width and height without a breakpoint
   // jump. Layout modes change composition only; visual size stays continuous.
   const sizeBasis = Math.sqrt(cssFrameWidth * cssFrameHeight);
@@ -84,6 +96,9 @@ export function computeResponsiveLayout({
   return {
     mode,
     portrait,
+    menuPortrait,
+    menuSafeWidth,
+    menuAvailableCssWidth,
     coarsePointer: Boolean(coarsePointer),
     touchVisible: Boolean(touchVisible),
     cssFrameWidth,
@@ -128,6 +143,7 @@ export function layoutSignature(layout) {
   return [
     layout.mode,
     layout.portrait ? 1 : 0,
+    layout.menuPortrait ? 1 : 0,
     layout.coarsePointer ? 1 : 0,
     layout.touchVisible ? 1 : 0,
     Math.round(layout.cssFrameWidth * 10),

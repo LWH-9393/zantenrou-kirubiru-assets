@@ -11,7 +11,7 @@
     <main class="shell" aria-label="하늘에서 몬스터가 떨어지는 날">
       <div class="game-column">
         <div class="game-frame">
-          <canvas id="game" width="640" height="480" aria-label="game canvas"></canvas>
+          <canvas id="game" width="640" height="480" tabindex="-1" aria-label="game canvas"></canvas>
           <div id="boot-status" class="boot-status" aria-live="polite">
             <div class="boot-mark" aria-hidden="true"><span></span><span></span><span></span></div>
             <p id="boot-title">밤하늘을 여는 중</p>
@@ -49,7 +49,7 @@
               <button class="tc-btn tc-attack" data-act="slash" aria-label="공격 및 확인">
                 <span class="tc-atlas tc-atlas-attack" aria-hidden="true"></span><span>공격</span>
               </button>
-              <button class="tc-btn tc-aux" data-act="aux" aria-label="리롤권 사용">
+              <button class="tc-btn tc-aux" data-act="aux" aria-label="새로고침 사용">
                 <span class="tc-symbol tc-more-symbol" aria-hidden="true">↻</span>
               </button>
             </div>
@@ -59,12 +59,14 @@
     </main>
 
     <!-- 순위 등록 이름 입력 -->
-    <div id="name-overlay" hidden>
+    <div id="name-overlay" role="dialog" aria-modal="true" aria-labelledby="name-heading" aria-describedby="name-hint" hidden>
       <div class="name-panel">
-        <h2>순위 등록</h2>
-        <p>이름을 입력하세요 (최대 8자)</p>
-        <input id="name-field" type="text" maxlength="8" autocomplete="off" placeholder="무명">
-        <button id="name-submit">기록하기</button>
+        <h2 id="name-heading">순위 등록</h2>
+        <label for="name-field">이름 <span>최대 8자</span></label>
+        <input id="name-field" type="text" maxlength="8" autocomplete="off" enterkeyhint="done" placeholder="무명" aria-describedby="name-hint">
+        <p id="name-hint">비워두면 ‘무명’으로 기록합니다</p>
+        <button id="name-submit" type="button">기록하기</button>
+        <button id="name-cancel" type="button">취소</button>
       </div>
     </div>
 

@@ -461,13 +461,16 @@ body[data-game-paused="true"] #touch .tc-btn {
 
 #name-overlay {
   position: fixed;
-  inset: 0;
-  background: rgba(3, 2, 8, 0.7);
+  inset: 0 0 auto;
+  height: 100dvh;
+  background: rgba(3, 9, 22, 0.8);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 20;
-  padding: 20px;
+  padding: max(16px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 #name-overlay[hidden] {
@@ -476,58 +479,117 @@ body[data-game-paused="true"] #touch .tc-btn {
 
 .name-panel {
   width: min(360px, 92vw);
-  background: rgba(15, 11, 32, 0.97);
-  border: 1px solid var(--gold-dim);
-  border-radius: 12px;
-  padding: 22px 24px;
+  max-height: 100%;
+  overflow-y: auto;
+  background: linear-gradient(180deg, #14233b, #0a1428);
+  border-top: 1px solid var(--gold-dim);
+  border-bottom: 1px solid rgba(232, 179, 75, 0.14);
+  padding: 28px 24px 18px;
   text-align: center;
   box-shadow: 0 12px 60px rgba(0, 0, 0, 0.6);
 }
 
 .name-panel h2 {
-  margin: 0 0 6px;
+  margin: 0 0 24px;
   font-family: "Nanum Myeongjo", "AppleMyungjo", "Noto Serif KR", serif;
-  font-size: 20px;
-  color: var(--gold);
-  letter-spacing: 0.2em;
+  font-size: 24px;
+  color: #fff2c8;
+  letter-spacing: 0.08em;
 }
 
 .name-panel p {
-  margin: 0 0 14px;
+  margin: 10px 0 20px;
+  font-size: 13px;
+  color: #b5bdd0;
+  line-height: 1.5;
+}
+
+.name-panel label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 9px;
+  color: #eee9de;
+  font-size: 14px;
+}
+
+.name-panel label span {
+  color: #b5bdd0;
   font-size: 12px;
-  color: var(--muted);
 }
 
 #name-field {
   width: 100%;
-  padding: 10px 12px;
+  min-height: 48px;
+  padding: 12px;
   font-size: 16px;
   text-align: center;
   color: var(--text);
-  background: rgba(8, 6, 20, 0.9);
-  border: 1px solid rgba(180, 170, 220, 0.35);
-  border-radius: 8px;
+  background: rgba(5, 12, 27, 0.72);
+  border: 1px solid rgba(180, 194, 220, 0.35);
+  border-radius: 4px;
   outline: none;
-  margin-bottom: 12px;
+  margin: 0;
 }
 
 #name-field:focus {
   border-color: var(--gold);
 }
 
-#name-submit {
+#name-submit,
+#name-cancel {
+  position: relative;
   width: 100%;
-  padding: 10px 0;
-  font-size: 14px;
+  min-height: 48px;
+  padding: 12px 0;
+  font: inherit;
+  font-size: 17px;
   font-weight: 800;
-  letter-spacing: 0.1em;
-  color: var(--ink);
-  background: linear-gradient(180deg, #f7e3ae, var(--gold));
+  letter-spacing: 0.06em;
+  color: #fff2c8;
+  background: linear-gradient(90deg, transparent, rgba(12, 24, 54, 0.68) 18%, rgba(12, 24, 54, 0.68) 82%, transparent);
   border: none;
-  border-radius: 8px;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
-#name-submit:active {
+#name-submit::after,
+#name-cancel::after {
+  content: "";
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  bottom: 2px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #e8b34b 25%, #e8b34b 75%, transparent);
+}
+
+#name-cancel {
+  margin-top: 7px;
+  color: #bac4d6;
+  font-size: 15px;
+  font-weight: 600;
+  background: none;
+}
+
+#name-cancel::after {
+  opacity: 0.24;
+  height: 1px;
+}
+
+#name-submit:hover,
+#name-cancel:hover {
+  color: #fff7de;
+  filter: brightness(1.15);
+}
+
+#name-submit:focus-visible,
+#name-cancel:focus-visible {
+  outline: 2px solid #e8b34b;
+  outline-offset: 2px;
+}
+
+#name-submit:active,
+#name-cancel:active {
   transform: translateY(1px);
 }

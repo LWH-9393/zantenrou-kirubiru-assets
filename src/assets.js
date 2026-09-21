@@ -32,6 +32,8 @@ const SPRITE_FILES = {
   monster_boss_storm_v2: "monster_boss_storm_v3.png",
   bg_mid_v3: "bg_mid_v3.webp",
   title_keyart_mobile_v5: "title_keyart_mobile_v5.webp",
+  title_keyart_mobile_v6: "title_keyart_mobile_v6.webp",
+  title_keyart_medium_portrait_v7: "title_keyart_medium_portrait_v7.webp",
   title_keyart_square_v5: "title_keyart_square_v5.webp",
   title_keyart_wide_v5: "title_keyart_wide_v5.webp",
   title_logo_v4: "title_logo_v4.webp",
@@ -80,6 +82,7 @@ const SPRITE_FILES = {
 function loadImage(path) {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    // Same-origin rewrites still need this when a fallback CDN URL is used.
     img.crossOrigin = "anonymous";
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`필수 이미지 자산을 불러오지 못했습니다: ${path}`));
@@ -108,7 +111,7 @@ async function loadNamedSprites(names, sprites, base, onProgress) {
 export async function loadCriticalSprites(base = "./assets/img/", onProgress = () => {}) {
   const names = [
     "bg_far_mobile_v3", "bg_far_wide_v3", "bg_mid_v3",
-    "title_keyart_mobile_v5", "title_keyart_square_v5", "title_keyart_wide_v5", "title_logo_v4",
+    "title_keyart_mobile_v6", "title_keyart_medium_portrait_v7", "title_keyart_square_v5", "title_keyart_wide_v5", "title_logo_v4",
     "ui_frame_atlas_v1", "ui_icon_atlas_v1",
     ...WEAPON_SPRITE_NAMES,
   ];
@@ -131,7 +134,7 @@ export async function loadSprites(base = "./assets/img/", onProgress = () => {})
   const sprites = {};
   await loadNamedSprites([
     "bg_far_mobile_v3", "bg_far_wide_v3", "bg_mid_v3", "bg_near_v3", "bg_stage_v3",
-    "title_keyart_mobile_v5", "title_keyart_square_v5", "title_keyart_wide_v5", "title_logo_v4",
+    "title_keyart_mobile_v6", "title_keyart_medium_portrait_v7", "title_keyart_square_v5", "title_keyart_wide_v5", "title_logo_v4",
     "ui_frame_atlas_v1", "ui_icon_atlas_v1",
   ], sprites, base, () => {});
   await loadNamedSprites([...WEAPON_SPRITE_NAMES, ...GAMEPLAY_SPRITE_NAMES], sprites, base, onProgress);

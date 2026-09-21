@@ -137,7 +137,7 @@ function ensureLobby(profile) {
 export function applyCarrySelection(profile, economyConfig, count) {
   ensureLobby(profile);
   const config = normalizeEconomyConfig(economyConfig);
-  const carry = requireInteger(count, "INVALID_CARRY", "반입할 리롤권 수가 올바르지 않습니다.");
+  const carry = requireInteger(count, "INVALID_CARRY", "구매 새로고침 횟수가 올바르지 않습니다.");
   const available = Math.min(config.reroll.carryLimit, profile.wallet.rerollTickets);
   if (carry > available) throw new EconomyError("CARRY_UNAVAILABLE", "보유량 또는 반입 한도를 넘었습니다.");
   profile.preparation.carryTickets = carry;
@@ -280,23 +280,23 @@ export function applyShardAward(profile, { runId, ownerId, now, amount, stats = 
 
 function normalizeRerollCards(cards) {
   if (!Array.isArray(cards) || cards.length !== 3) {
-    throw new EconomyError("INVALID_REROLL_CARDS", "리롤 결과는 서로 다른 카드 3장이어야 합니다.");
+    throw new EconomyError("INVALID_REROLL_CARDS", "새로고침 결과는 서로 다른 카드 3장이어야 합니다.");
   }
-  const normalized = cards.map((id) => requireId(id, "INVALID_REROLL_CARDS", "리롤 카드 ID가 올바르지 않습니다."));
+  const normalized = cards.map((id) => requireId(id, "INVALID_REROLL_CARDS", "새로고침 카드 ID가 올바르지 않습니다."));
   if (new Set(normalized).size !== normalized.length) {
-    throw new EconomyError("INVALID_REROLL_CARDS", "리롤 결과에 같은 카드가 중복되었습니다.");
+    throw new EconomyError("INVALID_REROLL_CARDS", "새로고침 결과에 같은 카드가 중복되었습니다.");
   }
   return normalized;
 }
 
 export function rerollOfferSetSignature(cards) {
   if (!Array.isArray(cards)) {
-    throw new EconomyError("INVALID_REROLL_CARDS", "리롤 카드 목록이 올바르지 않습니다.");
+    throw new EconomyError("INVALID_REROLL_CARDS", "새로고침 카드 목록이 올바르지 않습니다.");
   }
   const ids = cards.map((card) => requireId(
     typeof card === "string" ? card : card?.id,
     "INVALID_REROLL_CARDS",
-    "리롤 카드 ID가 올바르지 않습니다.",
+    "새로고침 카드 ID가 올바르지 않습니다.",
   ));
   return JSON.stringify(ids.sort());
 }
@@ -305,9 +305,9 @@ export function applyRerollUse(profile, { runId, ownerId, now, cards, minRank = 
   const run = activeRun(profile, runId, ownerId);
   const resultCards = normalizeRerollCards(cards);
   if (minRank !== null && !["rare", "epic"].includes(minRank)) {
-    throw new EconomyError("INVALID_REROLL_RANK", "리롤의 최소 등급 값이 올바르지 않습니다.");
+    throw new EconomyError("INVALID_REROLL_RANK", "새로고침의 최소 등급 값이 올바르지 않습니다.");
   }
-  const timestamp = requireInteger(now, "INVALID_TIME", "리롤 시간이 올바르지 않습니다.");
+  const timestamp = requireInteger(now, "INVALID_TIME", "새로고침 시간이 올바르지 않습니다.");
   let source = null;
   if (run.freeRerollsRemaining > 0) {
     run.freeRerollsRemaining -= 1;
@@ -317,7 +317,7 @@ export function applyRerollUse(profile, { runId, ownerId, now, cards, minRank = 
     run.purchasedTicketsSpent += 1;
     source = "purchased";
   } else {
-    throw new EconomyError("NO_REROLL_AVAILABLE", "사용할 수 있는 리롤권이 없습니다.");
+    throw new EconomyError("NO_REROLL_AVAILABLE", "사용할 수 있는 새로고침이 없습니다.");
   }
   run.rerollSequence += 1;
   run.lastReroll = { sequence: run.rerollSequence, cards: resultCards, minRank, at: timestamp };
@@ -339,11 +339,11 @@ export function applyFreeRerollRefill(profile, economyConfig, { runId, ownerId, 
   const gain = amount === null ? config.reroll.bossRefillAmount : requireInteger(
     amount,
     "INVALID_REFILL",
-    "무료 리롤 보충량이 올바르지 않습니다.",
+    "무료 새로고침 보충량이 올바르지 않습니다.",
   );
   const before = run.freeRerollsRemaining;
   run.freeRerollsRemaining = Math.min(config.reroll.freeRerollCap, safeAdd(before, gain));
-  run.updatedAt = Math.max(run.updatedAt, requireInteger(now, "INVALID_TIME", "리롤 보충 시간이 올바르지 않습니다."));
+  run.updatedAt = Math.max(run.updatedAt, requireInteger(now, "INVALID_TIME", "새로고침 보충 시간이 올바르지 않습니다."));
   return { added: run.freeRerollsRemaining - before, freeRemaining: run.freeRerollsRemaining, run: clone(run) };
 }
 
@@ -505,13 +505,13 @@ export function validateProfileEconomyBounds(profile, economyConfig) {
   const carry = requireInteger(
     profile?.preparation?.carryTickets,
     "INVALID_CARRY",
-    "저장된 리롤권 반입 수가 올바르지 않습니다.",
+    "저장된 구매 새로고침 횟수가 올바르지 않습니다.",
   );
   if (carry > config.reroll.carryLimit) {
-    throw new EconomyError("CARRY_EXCEEDS_LIMIT", "저장된 리롤권 반입 수가 한도를 넘었습니다.");
+    throw new EconomyError("CARRY_EXCEEDS_LIMIT", "저장된 구매 새로고침 횟수가 한도를 넘었습니다.");
   }
   if (!profile.activeRun && carry > profile.wallet.rerollTickets) {
-    throw new EconomyError("CARRY_EXCEEDS_STOCK", "저장된 리롤권 반입 수가 재고를 넘었습니다.");
+    throw new EconomyError("CARRY_EXCEEDS_STOCK", "저장된 구매 새로고침 횟수가 보유 수량을 넘었습니다.");
   }
   if (profile.activeRun) {
     const run = profile.activeRun;
@@ -519,10 +519,10 @@ export function validateProfileEconomyBounds(profile, economyConfig) {
       throw new EconomyError("ACTIVE_RUN_ALREADY_SETTLED", "이미 정산된 모험이 진행 중으로 저장되어 있습니다.");
     }
     if (run.freeRerollsRemaining > config.reroll.freeRerollCap) {
-      throw new EconomyError("FREE_REROLLS_EXCEED_CAP", "진행 중인 모험의 무료 리롤 수가 상한을 넘었습니다.");
+      throw new EconomyError("FREE_REROLLS_EXCEED_CAP", "진행 중인 모험의 무료 새로고침 수가 상한을 넘었습니다.");
     }
     if (run.purchasedTicketsReserved > config.reroll.carryLimit) {
-      throw new EconomyError("RESERVED_TICKETS_EXCEED_LIMIT", "진행 중인 모험의 구매 리롤권이 반입 한도를 넘었습니다.");
+      throw new EconomyError("RESERVED_TICKETS_EXCEED_LIMIT", "진행 중인 모험의 구매 새로고침 횟수가 한도를 넘었습니다.");
     }
   }
   if (profile.lastSettlement && !SETTLEMENT_REASONS.includes(profile.lastSettlement.reason)) {

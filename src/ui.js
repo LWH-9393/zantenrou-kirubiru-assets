@@ -1,6 +1,7 @@
 // HUD and screen chrome. Registers mouse hit-regions for menu buttons each
 // frame (scenes.js resolves clicks). Terminology policy: plain Korean only.
 import * as engine from "./engine.js";
+import { idleFrameAt, weaponCharacterScale } from "./attack-motion.js";
 
 export const SANS = '"Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif';
 export const SERIF = '"Nanum Myeongjo", "AppleMyungjo", "Noto Serif KR", serif';
@@ -9,7 +10,7 @@ const GOLD = "#e8b34b";
 const GOLD_DIM = "rgba(232,179,75,0.4)";
 const INK = "#0a0718";
 const TEXT = "#ece6f4";
-const MUTED = "#9a92b8";
+const MUTED = "#b5bfd2";
 const MP_COL = ["#3d6fd8", "#6fb7ff"];
 const HP_COL = ["#ff7a7a", "#c4222c"];
 const FORGE_RAY_COUNT = 192;
@@ -68,8 +69,10 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
   // --- mouse hit regions (rebuilt every frame by the draw calls) ---
   let hits = [];
   let metrics = {};
+  let pointer = { x: -1, y: -1, down: false };
   const forgeGemCache = new Map();
   const forgeGlowCache = new Map();
+  const tiledFrameCache = new Map();
 
   function beginFrame() {
     hits = [];
@@ -86,6 +89,10 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
 
   function region(x, y, w, h, id) {
     hits.push({ x, y, w, h, id });
+  }
+
+  function setPointer(x, y, down = false) {
+    pointer = { x, y, down };
   }
 
   function hitAt(x, y) {
@@ -156,6 +163,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
   }
 
   function uiSafeWidth() {
+    if (layoutState.menuSafeWidth) return layoutState.menuSafeWidth;
     const visibleWidth = Math.min(W, layoutState.visibleLogicalWidth || W);
     if (!isWideLayout()) return Math.min(SAFE_W, visibleWidth);
     return Math.min(1280, Math.max(SAFE_W, visibleWidth - 32 * baseUiScale()));
@@ -177,7 +185,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
   }
 
   function isMobileLayout() {
-    return Boolean(layoutState.portrait);
+    return Boolean(layoutState.menuPortrait ?? layoutState.portrait);
   }
 
   function isWideLayout() {
@@ -193,7 +201,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
   }
 
   function combatHudBounds() {
-    if (isMobileLayout()) return safeBounds({ combat: true });
+    if (layoutState.portrait) return safeBounds({ combat: true });
     const visibleLeft = layoutState.visibleLogicalLeft || 0;
     const visibleWidth = Math.min(W, layoutState.visibleLogicalWidth || W);
     const inset = 24 * baseUiScale();
@@ -327,7 +335,69 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     });
   }
 
-  function drawUiFrame(name, x, y, w, h, { alpha = 1 } = {}) {
+  function frameScaleFor(record, grid, w, h, preferredScale) {
+    const fixed = (cuts, stretch) => cuts.slice(0, -1).reduce((total, start, i) =>
+      total + (stretch?.includes(i) ? 0 : cuts[i + 1] - start), 0);
+    const natural = Math.min(w / record.rect[2], h / record.rect[3]);
+    return Math.min(preferredScale ?? natural, w / fixed(grid.x, grid.xStretch), h / fixed(grid.y, grid.yStretch));
+  }
+
+  function tiledFrame(name, image, record, grid, w, h, scale) {
+    const key = `${name}:${w}:${h}:${scale}`;
+    if (tiledFrameCache.has(key)) return tiledFrameCache.get(key);
+    const canvas = document.createElement("canvas");
+    // Assemble on the atlas pixel grid, then scale the complete surface once.
+    // Fractional per-tile destinations leave hairline alpha seams on Canvas.
+    canvas.width = Math.ceil(w / scale);
+    canvas.height = Math.ceil(h / scale);
+    const target = canvas.getContext("2d");
+    const [sx, sy, sw, sh] = record.rect;
+    const snap = segments => segments.map(segment => ({ ...segment, target: Math.round(segment.target),
+      targetLength: Math.round(segment.target + segment.targetLength) - Math.round(segment.target) }));
+    const columns = snap(sliceAxis(sw, grid.x, grid.xStretch, canvas.width, 1));
+    const rows = snap(sliceAxis(sh, grid.y, grid.yStretch, canvas.height, 1));
+    target.imageSmoothingEnabled = true;
+    if (grid.fill) {
+      const [fx, fy, fw, fh] = grid.fill;
+      const left = grid.edgeWidth || columns[0].targetLength;
+      const right = grid.edgeWidth || columns.at(-1).targetLength;
+      const top = rows[0].targetLength;
+      target.drawImage(image, sx + fx, sy + fy, fw, fh,
+        left, top, canvas.width - left - right, canvas.height - top - rows.at(-1).targetLength);
+    }
+    rows.forEach((row, ri) => columns.forEach((column, ci) => {
+      if (grid.borderOnly && ri > 0 && ri < rows.length - 1 && ci > 0 && ci < columns.length - 1) return;
+      if (grid.edgeWidth && ri > 0 && ri < rows.length - 1) {
+        // The middle rail is narrower than the corner ornaments. Repeating
+        // the whole corner-width column would also repeat blocks of backing.
+        const right = ci === columns.length - 1;
+        column = { ...column, source: right ? sw - grid.edgeWidth : 0, length: grid.edgeWidth,
+          target: right ? canvas.width - grid.edgeWidth : 0, targetLength: grid.edgeWidth };
+      }
+      if (column.targetLength <= 0 || row.targetLength <= 0) return;
+      const repeatX = grid.xRepeat?.includes(ci);
+      const repeatY = grid.yRepeat?.includes(ri);
+      const tileW = repeatX ? column.length : column.targetLength;
+      const tileH = repeatY ? row.length : row.targetLength;
+      // Crop the final tile at its natural scale. Stretching the remainder
+      // would distort exactly the small metal details this path preserves.
+      for (let ty = 0; ty < row.targetLength - 0.0001; ty += tileH) {
+        const dh = Math.min(tileH, row.targetLength - ty);
+        for (let tx = 0; tx < column.targetLength - 0.0001; tx += tileW) {
+          const dw = Math.min(tileW, column.targetLength - tx);
+          target.drawImage(image, sx + column.source, sy + row.source,
+            repeatX ? dw : column.length, repeatY ? dh : row.length,
+            column.target + tx, row.target + ty, dw, dh);
+        }
+      }
+    }));
+    // Only assembled surfaces are cached; source atlas pixels stay untouched.
+    if (tiledFrameCache.size >= 6) tiledFrameCache.delete(tiledFrameCache.keys().next().value);
+    tiledFrameCache.set(key, canvas);
+    return canvas;
+  }
+
+  function drawUiFrame(name, x, y, w, h, { alpha = 1, frameScale = null } = {}) {
     const image = sprites.ui_frame_atlas_v1;
     const record = uiAtlas?.frame?.frames?.[name];
     if (!image || !record?.rect) return false;
@@ -345,7 +415,11 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     }
 
     const [sx, sy, sw, sh] = record.rect;
-    const scale = Math.min(w / sw, h / sh);
+    const scale = frameScaleFor(record, grid, w, h, frameScale);
+    if (grid.xRepeat?.length || grid.yRepeat?.length) {
+      const surface = tiledFrame(name, image, record, grid, w, h, scale);
+      return drawAtlasRegion(surface, [0, 0, w / scale, h / scale], x, y, w, h, alpha);
+    }
     const columns = sliceAxis(sw, grid.x, grid.xStretch, w, scale);
     const rows = sliceAxis(sh, grid.y, grid.yStretch, h, scale);
 
@@ -584,11 +658,15 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
   }
 
   function drawSystemControls({ scene, paused, muted }) {
+    if (paused) {
+      metrics.systemControls = {};
+      return;
+    }
     const bounds = scene === "run"
       ? combatHudBounds()
       : isShortLandscape() ? shortLandscapeBounds() : safeBounds();
     const scale = hudUiScale();
-    if (scene !== "run" || paused) {
+    if (scene !== "run") {
       const x = snapCssX(bounds.right - 28 * scale);
       const y = snapCssY(32 * scale);
       speakerIcon(x, y, muted, 0.82 * scale);
@@ -597,13 +675,13 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       return;
     }
 
-    const mobile = isMobileLayout();
-    const hitSize = 40 * scale;
-    const controlsY = (mobile ? (metrics.hud?.boss ? 218 : 172) : 108) * scale;
+    const mobile = Boolean(layoutState.portrait);
+    const hitSize = 44 * scale;
+    const controlsY = (mobile ? 26 : 108) * scale;
     const scoreBottom = metrics.hud?.score ? metrics.hud.score.y + metrics.hud.score.h : 0;
-    const y = snapCssY(Math.max(controlsY, scoreBottom + hitSize / 2 + 4 * scale));
+    const y = snapCssY(mobile ? controlsY : Math.max(controlsY, scoreBottom + hitSize / 2 + 4 * scale));
     const muteX = snapCssX(bounds.right - 22 * scale);
-    const pauseX = snapCssX(bounds.right - 66 * scale);
+    const pauseX = snapCssX(bounds.right - 70 * scale);
     pauseIcon(pauseX, y, 0.75 * scale);
     speakerIcon(muteX, y, muted, 0.78 * scale);
     const pauseBox = snapCssRect(pauseX - hitSize / 2, y - hitSize / 2, hitSize, hitSize);
@@ -613,132 +691,146 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     metrics.systemControls = { pause: pauseBox, mute: muteBox, rowY: y };
   }
 
-  function drawPauseOverlayLandscape({ upgrades = [], weaponName = "", stats = null, reducedMotion = false, shards = 0 } = {}) {
-    const bounds = shortLandscapeBounds(760);
-    const scale = baseUiScale();
-    const cx = bounds.cx;
-    const width = Math.min(bounds.width, 700 * scale);
-    const left = cx - width / 2;
-    const top = 14 * scale;
-    ctx.save();
-    ctx.fillStyle = "rgba(5,3,12,0.88)";
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-    panel(left, top, width, 347 * scale, { alpha: 0.96, border: GOLD_DIM, radius: 12 * scale });
-    text("잠시 쉬어가기", cx, top + 37 * scale, {
-      size: 23 * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center", spacing: 2 * scale,
-    });
-    ornament(cx, top + 52 * scale, 112 * scale);
-
-    const colGap = 26 * scale;
-    const colW = (width - 64 * scale - colGap) / 2;
-    const leftX = left + 32 * scale;
-    const rightX = leftX + colW + colGap;
-    text("모험의 기본", leftX, top + 82 * scale, { size: 12.5 * scale, color: GOLD, weight: 900 });
-    const help = [
-      "A / D 이동   J 공격   W 점프",
-      "S 방어   K 기술   P 일시정지   M 소리",
-      "한 칸을 깨면 가로줄 전체가 끊어집니다",
-      "공격을 쉬면 MP가 차고 기술을 쓸 수 있습니다",
-    ];
-    help.forEach((line, i) => text(line, leftX, top + (106 + i * 25) * scale, {
-      size: fitTextSize(line, 11.5 * scale, colW), color: i < 2 ? TEXT : "#b5c3d8", weight: 650,
-    }));
-
-    text(weaponName ? `현재 조합 · ${weaponName}` : "현재 조합", rightX, top + 82 * scale, { size: 12.5 * scale, color: GOLD, weight: 900 });
-    if (stats) {
-      const stat = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString("ko-KR", { maximumFractionDigits: 1 }) : "—";
-      text(`공격 ${stat(stats.power)}   사거리 ${stat(stats.range)}   초당 ${stat(stats.speed)}회`, rightX, top + 106 * scale, {
-        size: fitTextSize(`공격 ${stat(stats.power)}   사거리 ${stat(stats.range)}   초당 ${stat(stats.speed)}회`, 11.5 * scale, colW), color: "#fff2d0", weight: 800,
-      });
-    }
-    text(`이번 모험 파편  ${Math.max(0, Number(shards) || 0).toLocaleString("ko-KR")}`, rightX, top + 131 * scale, {
-      size: 11.5 * scale, color: "#9fe5ff", weight: 850,
-    });
-    const build = upgrades.length
-      ? upgrades.map((upgrade) => `${upgrade.name}${upgrade.count > 1 ? ` ×${upgrade.count}` : ""}`).join("  ·  ")
-      : "아직 강화가 없습니다 · 단조에서 조합을 만들어보세요";
-    wrapText(build, rightX, top + 157 * scale, colW, 11 * scale, TEXT, 4 * scale, "left", 650);
-
-    const motion = outlinedActionButton(cx, top + 246 * scale, width - 64 * scale, 36 * scale,
-      `화면 효과  ${reducedMotion ? "약하게" : "기본"}  ·  누르면 변경`, "system:motion", { scale, fontSize: 11.5 });
-    const actionGap = 14 * scale;
-    const actionW = (width - 64 * scale - actionGap) / 2;
-    const quit = outlinedActionButton(cx - (actionW + actionGap) / 2, top + 307 * scale, actionW, 44 * scale,
-      "종료하고 파편 정산", "pause:quit", { danger: true, scale, fontSize: 13 });
-    const resume = outlinedActionButton(cx + (actionW + actionGap) / 2, top + 307 * scale, actionW, 44 * scale,
-      "모험 계속  ·  P", "pause:resume", { selected: true, scale, fontSize: 13 });
-    metrics.pause = {
-      x: left, y: top, w: width, h: 347 * scale, upgrades: upgrades.map((upgrade) => upgrade.name), reducedMotion,
-      motion, quit, resume, shards: Math.max(0, Number(shards) || 0), landscape: true,
-    };
+  function drawPauseOverlayLandscape(options = {}) {
+    drawPauseOverlay({ ...options, compactLandscape: true });
   }
 
-  function drawPauseOverlay({ upgrades = [], weaponName = "", stats = null, reducedMotion = false, shards = 0 } = {}) {
-    if (isShortLandscape()) {
-      drawPauseOverlayLandscape({ upgrades, weaponName, stats, reducedMotion, shards });
+  function drawPauseOverlay({
+    upgrades = [], weaponName = "", stats = null, reducedMotion = false, shards = 0,
+    section = "main", focusedIndex = 0, scrollOffset = 0, muted = false,
+    touchInput = Boolean(layoutState.coarsePointer || layoutState.touchVisible), compactLandscape = false,
+  } = {}) {
+    if (isShortLandscape() && !compactLandscape) {
+      drawPauseOverlayLandscape({ upgrades, weaponName, stats, reducedMotion, shards, section, focusedIndex, scrollOffset, muted, touchInput });
       return;
     }
-    const mobile = isMobileLayout();
-    const bounds = safeBounds();
-    const scale = Math.min(screenUiScale(), (H - 58 * baseUiScale()) / 610);
+    const landscape = compactLandscape;
+    const bounds = landscape ? shortLandscapeBounds(760) : safeBounds();
+    // Keep type and touch targets in CSS pixels; only the list gives up height.
+    const scale = baseUiScale();
     const cx = bounds.cx;
-    const width = Math.min(bounds.width - 24 * baseUiScale(), 480 * scale);
-    const top = (H - 610 * scale) / 2;
+    const width = Math.min(bounds.width - (landscape ? 0 : 24) * scale, (section === "upgrades" ? 400 : 360) * scale);
+    const left = cx - width / 2;
+    const titles = { main: "일시정지", upgrades: "강화 보기", settings: "설정", controls: "조작법" };
+    const activeSection = Object.hasOwn(titles, section) ? section : "main";
+    const focusOrders = {
+      main: ["pause:resume", "pause:upgrades", "pause:settings", "pause:quit"],
+      upgrades: ["pause:back"],
+      settings: ["system:mute", "system:motion", "pause:controls", "pause:back"],
+      controls: ["pause:back"],
+    };
+    const focusOrder = focusOrders[activeSection];
+    const focus = clamp(Math.round(Number(focusedIndex) || 0), 0, focusOrder.length - 1);
+    const heights = {
+      main: landscape ? 276 : 316,
+      settings: landscape ? 306 : 352,
+      controls: landscape ? 306 : touchInput ? 306 : 346,
+      upgrades: Math.min((H / scale) - 32, 242 + Math.max(1, upgrades.length) * 44, 550),
+    };
+    const height = heights[activeSection] * scale;
+    const top = (H - height) / 2;
     ctx.save();
-    ctx.fillStyle = "rgba(5,3,12,0.85)";
+    ctx.fillStyle = "rgba(5,8,20,0.66)";
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
-    panel(cx - width / 2, top, width, 610 * scale, { alpha: 0.94, border: GOLD_DIM, radius: 12 * scale });
-    text("잠시 쉬어가기", cx, top + 42 * scale, {
-      size: 25 * scale, color: "#fff2c8", font: SERIF, weight: 800, align: "center", spacing: 2 * scale,
+    region(0, 0, W, H, "pause:block");
+    panel(left, top, width, height, { alpha: 0.96, border: "rgba(232,179,75,0.28)", radius: 10 * scale });
+    text(titles[activeSection], cx, top + (landscape ? 39 : 46) * scale, {
+      size: 26 * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center",
     });
-    ornament(cx, top + 61 * scale, width * 0.28);
-    const contentX = cx - width / 2 + 24 * scale;
-    text("모험의 기본", contentX, top + 92 * scale, { size: 13 * scale, color: GOLD, weight: 900 });
-    const controls = mobile
-      ? ["이동 버튼으로 약한 칸에 맞추세요", "공격·방어는 유지 / 점프·기술은 한 번씩 누르세요"]
-      : ["A / D  이동    J  공격    W  점프", "S  방어    K  기술    P  일시정지    M  소리"];
-    const help = [...controls, "한 칸을 깨면 가로줄 전체가 끊어집니다", "공격을 쉬면 MP가 차고, 기술을 쓸 수 있습니다", "HP는 생명력 · 방어는 막을 수 있는 힘"];
-    help.forEach((line, i) => text(line, contentX, top + (118 + i * 24) * scale, {
-      size: fitTextSize(line, 12 * scale, width - 48 * scale), color: i < 2 ? TEXT : "#b5c3d8", weight: 650,
-    }));
-    text(weaponName ? `현재 조합 · ${weaponName}` : "현재 조합", contentX, top + 266 * scale, { size: 13 * scale, color: GOLD, weight: 900 });
-    if (stats) {
-      const stat = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString("ko-KR", { maximumFractionDigits: 1 }) : "—";
-      text(`공격 ${stat(stats.power)}   사거리 ${stat(stats.range)}   초당 ${stat(stats.speed)}회`, contentX, top + 291 * scale, { size: 12 * scale, color: "#fff2d0", weight: 800 });
+    const actionWidth = width - 40 * scale;
+    const actions = { resume: null, quit: null, upgrades: null, settings: null, back: null, mute: null, motion: null, controls: null };
+    const drawAction = (name, label, id, y, { x = cx, w = actionWidth, h = 48 * scale, primary = false, danger = false, fontSize = 16 } = {}) => {
+      actions[name] = primaryActionButton(x, y, w, h, label, id, {
+        selected: primary || focusOrder[focus] === id, focused: focusOrder[focus] === id,
+        primary, danger, scale, fontSize,
+      });
+      return actions[name];
+    };
+    let scroll = null;
+    const rows = [];
+    if (activeSection === "main") {
+      drawAction("resume", "계속하기", "pause:resume", top + (landscape ? 94 : 116) * scale, { h: 54 * scale, primary: true, fontSize: 18 });
+      const gap = 12 * scale;
+      const halfWidth = (actionWidth - gap) / 2;
+      const secondaryY = top + (landscape ? 158 : 188) * scale;
+      drawAction("upgrades", "강화 보기", "pause:upgrades", secondaryY, { x: cx - (halfWidth + gap) / 2, w: halfWidth });
+      drawAction("settings", "설정", "pause:settings", secondaryY, { x: cx + (halfWidth + gap) / 2, w: halfWidth });
+      drawAction("quit", "모험 종료", "pause:quit", top + height - 46 * scale, { danger: true, w: actionWidth * 0.76, fontSize: 15 });
+    } else if (activeSection === "settings") {
+      const firstY = top + (landscape ? 86 : 99) * scale;
+      const rowGap = (landscape ? 51 : 60) * scale;
+      drawAction("mute", `소리  ${muted ? "꺼짐" : "켜짐"}`, "system:mute", firstY);
+      drawAction("motion", `화면 효과  ${reducedMotion ? "약하게" : "기본"}`, "system:motion", firstY + rowGap);
+      drawAction("controls", "조작법", "pause:controls", firstY + rowGap * 2);
+    } else if (activeSection === "controls") {
+      const controls = touchInput
+        ? [["이동", "좌우 버튼"], ["공격·방어", "길게 누르기"], ["점프·기술", "한 번 누르기"]]
+        : [["이동", "A / D"], ["공격·방어", "J / S"], ["점프·기술", "W / K"], ["일시정지·소리", "P / M"]];
+      const firstY = top + (landscape ? 83 : 97) * scale;
+      controls.forEach(([label, value], index) => {
+        const y = firstY + index * (landscape ? 36 : 40) * scale;
+        text(label, left + 25 * scale, y, { size: 14 * scale, color: MUTED, weight: 650 });
+        text(value, left + width - 25 * scale, y, { size: 15 * scale, color: TEXT, weight: 800, align: "right" });
+      });
+    } else if (activeSection === "upgrades") {
+      const contentX = left + 24 * scale;
+      const contentW = width - 48 * scale;
+      text(weaponName, contentX, top + 85 * scale, { size: 17 * scale, color: "#fff2c8", weight: 850 });
+      if (stats) {
+        const stat = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString("ko-KR", { maximumFractionDigits: 1 }) : "—";
+        const cells = [["공격", stat(stats.power)], ["사거리", stat(stats.range)], ["초당", `${stat(stats.speed)}회`]];
+        cells.forEach(([label, value], index) => {
+          const x = contentX + index * contentW / 3;
+          text(label, x, top + 111 * scale, { size: 14 * scale, color: MUTED, weight: 650 });
+          text(value, x, top + 135 * scale, { size: 16 * scale, color: TEXT, weight: 850 });
+        });
+      }
+      const rowHeight = 44 * scale;
+      const viewport = { x: contentX, y: top + 153 * scale, w: contentW, h: Math.max(44 * scale, height - 237 * scale) };
+      const contentHeight = Math.max(1, upgrades.length) * rowHeight;
+      const maxOffset = Math.max(0, contentHeight - viewport.h);
+      const offset = clamp(Number(scrollOffset) || 0, 0, maxOffset);
+      scroll = { ...viewport, offset, maxOffset, contentHeight, rowHeight };
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(viewport.x, viewport.y, viewport.w, viewport.h);
+      ctx.clip();
+      if (!upgrades.length) {
+        text("강화 없음", cx, viewport.y + 27 * scale, { size: 14 * scale, color: MUTED, align: "center" });
+      }
+      upgrades.forEach((upgrade, index) => {
+        const y = viewport.y + index * rowHeight - offset;
+        if (y + rowHeight <= viewport.y || y >= viewport.y + viewport.h) return;
+        ctx.strokeStyle = "rgba(185,199,219,0.13)";
+        ctx.lineWidth = scale;
+        ctx.beginPath();
+        ctx.moveTo(viewport.x, y + rowHeight - scale);
+        ctx.lineTo(viewport.x + viewport.w - 10 * scale, y + rowHeight - scale);
+        ctx.stroke();
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(viewport.x, y, viewport.w - 54 * scale, rowHeight);
+        ctx.clip();
+        text(upgrade.name, viewport.x, y + rowHeight / 2, { size: 15 * scale, color: TEXT, weight: 700, baseline: "middle" });
+        ctx.restore();
+        if (upgrade.count > 1) text(`×${upgrade.count}`, viewport.x + viewport.w - 12 * scale, y + rowHeight / 2, {
+          size: 14 * scale, color: GOLD, weight: 850, align: "right", baseline: "middle",
+        });
+        rows.push({ index, name: upgrade.name, count: upgrade.count || 1, x: viewport.x, y, w: viewport.w, h: rowHeight });
+      });
+      ctx.restore();
+      if (maxOffset > 0) {
+        const thumbH = Math.max(24 * scale, viewport.h * viewport.h / contentHeight);
+        ctx.fillStyle = "rgba(232,179,75,0.6)";
+        ctx.fillRect(viewport.x + viewport.w - 3 * scale, viewport.y + (viewport.h - thumbH) * offset / maxOffset, 2 * scale, thumbH);
+      }
     }
-    let line = "";
-    const buildLines = [];
-    for (const upgrade of upgrades) {
-      const token = `${upgrade.name}${upgrade.count > 1 ? ` ×${upgrade.count}` : ""}`;
-      const next = line ? `${line}  ·  ${token}` : token;
-      if (line && measureTextWidth(next, { size: 11.5 * scale }) > width - 48 * scale) {
-        buildLines.push(line);
-        line = token;
-      } else line = next;
-    }
-    if (line) buildLines.push(line);
-    if (!buildLines.length) buildLines.push("아직 강화가 없습니다 · 단조에서 조합을 만들어보세요");
-    const buildLineH = Math.min(24, 154 / Math.max(1, buildLines.length)) * scale;
-    buildLines.forEach((value, i) => text(value, contentX, top + 321 * scale + i * buildLineH, {
-      size: fitTextSize(value, Math.min(11.5 * scale, buildLineH * 0.72), width - 48 * scale), color: TEXT, weight: 650,
-    }));
-    const motionY = top + 480 * scale;
-    const motion = outlinedActionButton(cx, motionY, width - 48 * scale, 38 * scale,
-      `화면 효과  ${reducedMotion ? "약하게" : "기본"}  ·  누르면 변경`, "system:motion", { scale, fontSize: 11.5 });
-    const actionGap = 12 * scale;
-    const actionW = (width - 48 * scale - actionGap) / 2;
-    const quit = outlinedActionButton(cx - (actionW + actionGap) / 2, top + 544 * scale, actionW, 44 * scale,
-      "종료 후 정산", "pause:quit", { danger: true, scale, fontSize: mobile ? 12 : 13 });
-    const resume = outlinedActionButton(cx + (actionW + actionGap) / 2, top + 544 * scale, actionW, 44 * scale,
-      mobile ? "모험 계속" : "모험 계속  ·  P", "pause:resume", { selected: true, scale, fontSize: mobile ? 12 : 13 });
-    text("위험 예고는 효과 강도와 관계없이 표시됩니다", cx, top + 594 * scale, {
-      size: 10 * scale, color: MUTED, align: "center",
-    });
+    if (activeSection !== "main") drawAction("back", "이전으로", "pause:back", top + height - 43 * scale, { w: actionWidth * 0.78 });
     metrics.pause = {
-      x: cx - width / 2, y: top, w: width, h: 610 * scale, upgrades: buildLines, reducedMotion,
-      motion, quit, resume, shards: Math.max(0, Number(shards) || 0), landscape: false,
+      x: left, y: top, w: width, h: height, landscape, reducedMotion, muted,
+      section: activeSection, focusOrder, focusedIndex: focus, ...actions, scroll, rows,
+      upgradeNames: upgrades.map(upgrade => upgrade.name), shards: Math.max(0, Number(shards) || 0), touchInput,
     };
   }
 
@@ -859,31 +951,19 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     disabled = false,
     scale = 1,
     fontSize = 13,
+    primary = ["preparation:start", "weapon:confirm", "forge:confirm", "results:retry", "pause:resume", "quit:continue", "preparation:buyHp", "preparation:buyGuard", "preparation:buyTicket"].includes(id),
   } = {}) {
-    const x = cx - w / 2;
-    const y = cy - h / 2;
-    const border = disabled
-      ? selected ? "rgba(232,179,75,0.55)" : "rgba(150,140,190,0.2)"
-      : danger ? "rgba(255,122,122,0.75)" : selected ? GOLD : "rgba(150,170,205,0.38)";
-    panel(x, y, w, h, {
-      alpha: disabled ? selected ? 0.46 : 0.34 : selected ? 0.88 : 0.62,
-      border,
-      radius: Math.min(9 * scale, h / 2),
+    const box = primaryActionButton(cx, cy, w, h, label, id, {
+      selected: primary || selected, focused: selected, primary,
+      danger, disabled, scale, fontSize,
+      showPlayIcon: id === "preparation:start",
     });
-    text(label, cx, cy + 1 * scale, {
-      size: fontSize * scale,
-      color: disabled ? selected ? "#aaa17f" : "#777486" : danger ? "#ffaaaa" : selected ? "#fff2c8" : TEXT,
-      weight: selected || danger ? 900 : 750,
-      align: "center",
-      baseline: "middle",
-    });
-    region(x, y, w, h, id);
-    return { x, y, w, h, id, label, selected, danger, disabled };
+    return { ...box, selected, danger, disabled, primary };
   }
 
   // === run HUD ===
   function drawHud(s) {
-    const mobile = isMobileLayout();
+    const mobile = Boolean(layoutState.portrait);
     const bounds = combatHudBounds();
     const left = bounds.left;
     const right = bounds.right;
@@ -892,29 +972,30 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     const boundsCssWidth = bounds.width * (layoutState.cssScaleX || 1);
     const railT = mobile ? 0 : clamp((boundsCssWidth - 900) / 320, 0, 1);
     const stackedDesktop = !mobile && boundsCssWidth < 900;
-    const statusUnits = mobile ? 220 : 240 + 36 * railT;
+    const statusUnits = mobile ? 194 : 240 + 36 * railT;
+    const hasStageMeta = Boolean((s.stageType && s.stageType !== "normal") || (s.waveCount || 1) > 1);
     const hpFlash = s.hpFlashT < 0.5 ? Math.abs(Math.sin(s.hpFlashT * 24)) : 0;
     const status = snapCssRect(
       left + 10 * scale,
-      (s.boss ? 112 : mobile ? 80 : stackedDesktop ? 72 : 56) * scale,
+      (mobile ? hasStageMeta ? 54 : 42 : s.boss ? 112 : stackedDesktop ? 72 : 56) * scale,
       statusUnits * scale,
-      76 * scale,
+      (mobile ? 64 : 76) * scale,
     );
     const iconX = snapCssX(status.x + 14 * scale);
     const gaugeX = snapCssX(status.x + 61 * scale);
     const valueRight = snapCssX(status.x + status.w);
     const gaugeRight = snapCssX(valueRight - 62 * scale);
     const gaugeW = gaugeRight - gaugeX;
-    const hpRow = snapCssRect(status.x, status.y, status.w, 24 * scale);
-    const guardRow = snapCssRect(status.x, status.y + 26 * scale, status.w, 22 * scale);
-    const mpRow = snapCssRect(status.x, status.y + 52 * scale, status.w, 22 * scale);
+    const hpRow = snapCssRect(status.x, status.y, status.w, (mobile ? 20 : 24) * scale);
+    const guardRow = snapCssRect(status.x, status.y + (mobile ? 22 : 26) * scale, status.w, (mobile ? 20 : 22) * scale);
+    const mpRow = snapCssRect(status.x, status.y + (mobile ? 44 : 52) * scale, status.w, (mobile ? 20 : 22) * scale);
     const hpCenterY = snapCssY(hpRow.y + hpRow.h / 2);
     const guardCenterY = snapCssY(guardRow.y + guardRow.h / 2);
     const mpCenterY = snapCssY(mpRow.y + mpRow.h / 2);
 
     hudWash(status, { anchor: 0.26, strength: 0.62 });
 
-    drawUiIcon("hp", iconX, hpCenterY, 28 * scale, { alpha: hpFlash > 0 ? 1 : 0.95 });
+    drawUiIcon("hp", iconX, hpCenterY, (mobile ? 24 : 28) * scale, { alpha: hpFlash > 0 ? 1 : 0.95 });
     const statusLabelSize = (mobile ? 10.5 : 9) * scale;
     text("HP", status.x + 31 * scale, hpCenterY, { size: statusLabelSize, color: "#ffd3d3", weight: 850, baseline: "middle", stroke: true });
     const hpGauge = snapCssRect(gaugeX, hpCenterY - 5 * scale, gaugeW, 10 * scale);
@@ -976,7 +1057,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     let boss = null;
     if (s.boss) {
       const bossW = Math.min(bounds.width - 28 * scale, (mobile ? 282 : 322) * scale);
-      const bossY = 64 * scale;
+      const bossY = (mobile ? (s.mugetsuT > 0 || s.spearRageT > 0 ? 157 : 140) : 64) * scale;
       boss = snapCssRect(centerX - bossW / 2, bossY, bossW, 43 * scale);
       hudWash(boss, { anchor: 0.5, strength: 0.76 });
       text(s.boss.name || "폭풍 구름", boss.x + 4 * scale, boss.y + 10 * scale, { size: 10.5 * scale, color: "#ffe2a3", weight: 900, stroke: true });
@@ -986,7 +1067,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       text(`${Math.round(hpRatio * 100)}%`, boss.x + 4 * scale, boss.y + 40 * scale, { size: 9 * scale, color: "#ffdda5", weight: 850, stroke: true });
     }
 
-    const score = snapCssRect(right - 96 * scale, (mobile ? (s.boss ? 114 : 44) : stackedDesktop ? 56 : 18) * scale, 84 * scale, 62 * scale);
+    const score = snapCssRect(right - 96 * scale, (mobile ? 56 : stackedDesktop ? 56 : 18) * scale, 84 * scale, 62 * scale);
     const scoreRight = snapCssX(score.x + score.w);
     const scoreValue = String(s.score);
     const scoreSize = fitTextSize(scoreValue, (mobile ? 20 : 22) * scale, score.w, { font: SANS, weight: 900 });
@@ -1009,20 +1090,20 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     if (approaching) {
       const cx = centerX;
       const y = snapCssY(12 * scale);
-      approach = snapCssRect(cx - 58 * scale, y - 8 * scale, 116 * scale, 56 * scale);
+      approach = snapCssRect(cx - 58 * scale, y - 8 * scale, 116 * scale, (mobile ? 37 : 56) * scale);
       const pulse = 0.72 + Math.sin(s.t * 8) * 0.18;
       const progress = clamp(s.approach.progress || 0, 0, 1);
-      drawUiIcon("down", cx, snapCssY(y + 6 * scale), 30 * scale, { alpha: pulse });
+      drawUiIcon("down", cx, snapCssY(y + (mobile ? 1 : 6) * scale), (mobile ? 21 : 30) * scale, { alpha: pulse });
       ctx.save();
       ctx.globalAlpha = 0.24;
       ctx.fillStyle = TEXT;
-      const approachTrack = snapCssRect(cx - 48 * scale, y + 26 * scale, 96 * scale, 2 * scale);
+      const approachTrack = snapCssRect(cx - (mobile ? 28 : 48) * scale, y + (mobile ? 12 : 26) * scale, (mobile ? 56 : 96) * scale, 2 * scale);
       ctx.fillRect(approachTrack.x, approachTrack.y, approachTrack.w, approachTrack.h);
       ctx.globalAlpha = 0.9;
       ctx.fillStyle = s.stageType === "boss" ? "#ff8a8f" : GOLD;
       ctx.fillRect(approachTrack.x, approachTrack.y, snapCssX(approachTrack.w * progress), approachTrack.h);
       ctx.restore();
-      text("적이 접근 중입니다", cx, snapCssY(y + 43 * scale), {
+      text("적이 접근 중입니다", cx, snapCssY(y + (mobile ? 27 : 43) * scale), {
         size: 10.5 * scale,
         color: s.stageType === "boss" ? "#ffb0b3" : "#ffe2a3",
         weight: 800,
@@ -1044,7 +1125,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       const emphasis = !s.hazardActive && (s.comboCelebration || s.combo === tier.min);
       const comboScale = scale * (emphasis ? 0.76 : 0.52);
       const cx = snapCssX(right - 48 * scale);
-      const cy = snapCssY((mobile ? (s.boss ? 299 : 252) : stackedDesktop ? 206 : 184) * scale);
+      const cy = snapCssY((mobile ? (s.boss ? 236 : 178) : stackedDesktop ? 206 : 184) * scale);
       combo = snapCssRect(cx - 76 * comboScale, cy - 66 * comboScale, 152 * comboScale, 128 * comboScale);
       const impactDuration = comboAtlas?.impact?.frameDuration || 0.055;
       const impactTier = comboAtlas?.impact?.tiers?.find((candidate) => candidate.id === tier?.id);
@@ -1130,7 +1211,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
         : (stackedDesktop ? 222 : 143) * scale;
       hint = snapCssRect(centerX - hintW / 2, hintY, hintW, 34 * scale);
       hudWash(hint, { anchor: 0.5, strength: 0.65 });
-      text(learningHint, centerX, hintY + 20 * scale, { size: fitTextSize(learningHint, 10.5 * scale, hintW - 12 * scale), color: "#fff0c9", align: "center", weight: 850, stroke: true });
+      text(learningHint, centerX, hintY + 20 * scale, { size: fitTextSize(learningHint, (mobile ? 12 : 10.5) * scale, hintW - 12 * scale), color: "#fff0c9", align: "center", weight: 850, stroke: true });
     }
 
     if (s.upgrades.length && !mobile) {
@@ -1181,25 +1262,33 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     scale = 1,
     showPlayIcon = false,
     fontSize = 20,
+    focused = false,
+    primary = true,
+    danger = false,
+    disabled = false,
   } = {}) {
     const left = cx - w / 2;
+    const hover = pointer.x >= left && pointer.x <= left + w && pointer.y >= cy - h / 2 && pointer.y <= cy + h / 2;
+    const active = !disabled && (selected || hover);
+    const pressed = hover && pointer.down && !disabled;
     ctx.save();
     const glow = ctx.createLinearGradient(left, 0, left + w, 0);
     glow.addColorStop(0, "rgba(7,17,43,0)");
-    glow.addColorStop(0.18, selected ? "rgba(12,24,54,0.68)" : "rgba(12,24,54,0.25)");
-    glow.addColorStop(0.82, selected ? "rgba(12,24,54,0.68)" : "rgba(12,24,54,0.25)");
+    const wash = disabled ? "rgba(12,24,54,0.2)" : pressed ? "rgba(31,48,78,0.9)" : active ? "rgba(12,24,54,0.68)" : "rgba(12,24,54,0.25)";
+    glow.addColorStop(0.18, wash);
+    glow.addColorStop(0.82, wash);
     glow.addColorStop(1, "rgba(7,17,43,0)");
     ctx.fillStyle = glow;
     ctx.fillRect(left, cy - h / 2, w, h);
-    ctx.strokeStyle = selected ? "rgba(255,218,126,0.9)" : "rgba(210,225,255,0.22)";
-    ctx.lineWidth = selected ? 2 * scale : 1 * scale;
+    ctx.strokeStyle = disabled ? "rgba(185,199,219,0.14)" : danger ? "rgba(255,122,122,0.75)" : active ? "rgba(255,218,126,0.9)" : "rgba(210,225,255,0.3)";
+    ctx.lineWidth = active ? 2 * scale : 1 * scale;
     ctx.beginPath();
     ctx.moveTo(left + 18 * scale, cy + h / 2 - 1 * scale);
     ctx.lineTo(left + w - 18 * scale, cy + h / 2 - 1 * scale);
     ctx.stroke();
     if (showPlayIcon) {
       const playX = cx - 70 * scale;
-      ctx.fillStyle = selected ? GOLD : "#aaa6bb";
+      ctx.fillStyle = disabled ? "#707d96" : active ? GOLD : "#aaa6bb";
       ctx.beginPath();
       ctx.moveTo(playX - 5 * scale, cy - 8 * scale);
       ctx.lineTo(playX + 8 * scale, cy);
@@ -1207,16 +1296,20 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
       ctx.closePath();
       ctx.fill();
     }
+    if (focused && !showPlayIcon && !disabled) {
+      ctx.fillStyle = danger ? "#ffaaaa" : GOLD;
+      ctx.fillRect(left + 8 * scale, cy - 2 * scale, 4 * scale, 4 * scale);
+    }
     ctx.restore();
     text(label, cx + (showPlayIcon ? 10 * scale : 0), cy + 1 * scale, {
-      size: fontSize * scale,
-      color: selected ? "#fff8e5" : "#b5b1c2",
-      weight: 900,
+      size: fitTextSize(label, fontSize * scale, w - (showPlayIcon ? 70 : 30) * scale),
+      color: disabled ? "#8190a9" : danger ? "#ffb2a8" : active ? "#fff8e5" : "#c0ccdf",
+      weight: primary || active ? 900 : 700,
       align: "center",
       baseline: "middle",
     });
     region(left, cy - h / 2, w, h, id);
-    return { x: left, y: cy - h / 2, w, h, id, label, selected };
+    return { x: left, y: cy - h / 2, w, h, id, label, selected, primary, focused, disabled, danger };
   }
 
   // === title ===
@@ -1230,8 +1323,13 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     const actionScale = isShortLandscape() ? baseUiScale() : clamp(scale, 1.05, 1.5);
     const titleCx = cinematicWide ? bounds.left + 205 : cx;
 
-    const keyArtName = mobile
-      ? "title_keyart_mobile_v5"
+    const titleFrameRatio = (layoutState.cssFrameWidth || W) / (layoutState.cssFrameHeight || H);
+    const portraitArt = titleFrameRatio < 0.62;
+    const mediumPortraitArt = titleFrameRatio >= 0.62 && titleFrameRatio < 0.9;
+    const keyArtName = portraitArt
+      ? "title_keyart_mobile_v6"
+      : mediumPortraitArt
+        ? "title_keyart_medium_portrait_v7"
       : verticalTitle
         ? "title_keyart_square_v5"
         : "title_keyart_wide_v5";
@@ -1239,10 +1337,18 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     const artScale = Math.max(W / keyArt.width, H / keyArt.height);
     const artW = keyArt.width * artScale;
     const artH = keyArt.height * artScale;
-    const artX = (W - artW) / 2;
+    const artX = cx - artW / 2;
     const artY = (H - artH) / 2;
 
     ctx.save();
+    if (verticalTitle) {
+      const sky = ctx.createLinearGradient(0, 0, 0, H);
+      sky.addColorStop(0, "#103d8f");
+      sky.addColorStop(0.58, "#0a2b69");
+      sky.addColorStop(1, "#041230");
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, W, H);
+    }
     ctx.drawImage(keyArt, artX, artY, artW, artH);
     if (cinematicWide) {
       let shade = ctx.createLinearGradient(0, 0, W * 0.58, 0);
@@ -1259,6 +1365,10 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     }
     ctx.restore();
     metrics.titleKeyArtBox = { left: 0, right: W, top: 0, bottom: H };
+    metrics.titleKeyArtDrawBox = {
+      left: artX, right: artX + artW, top: artY, bottom: artY + artH,
+      width: artW, height: artH, sourceWidth: keyArt.width, sourceHeight: keyArt.height,
+    };
     metrics.titleKeyArtMode = keyArtName;
 
     ctx.save();
@@ -1277,11 +1387,16 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     ctx.restore();
 
     const logo = sprites.title_logo_v4;
-    const logoW = verticalTitle ? 420 : cinematicWide ? 400 : 460;
+    const shortPortrait = portraitArt && (layoutState.cssFrameHeight || H) < 660;
+    const logoW = verticalTitle
+      ? mediumPortraitArt
+        ? Math.min(bounds.width * 0.62, 360)
+        : Math.min(bounds.width * (shortPortrait ? 0.6 : 0.69), 400)
+      : cinematicWide ? 370 : 420;
     const logoH = logo.height / logo.width * logoW;
-    const logoTop = verticalTitle ? 105 : cinematicWide ? 45 : 112;
+    const logoTop = shortPortrait ? 14 * baseUiScale() : verticalTitle ? H * 0.066 : cinematicWide ? 45 : 84;
     ctx.save();
-    ctx.filter = "drop-shadow(0 10px 12px rgba(2,7,23,0.54))";
+    ctx.filter = "drop-shadow(0 5px 8px rgba(2,7,23,0.32))";
     ctx.drawImage(logo, titleCx - logoW / 2, logoTop, logoW, logoH);
     ctx.restore();
     metrics.titleLogoBox = {
@@ -1293,7 +1408,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     };
 
     const menuCx = isShortLandscape() ? bounds.cx : cinematicWide ? bounds.right - 220 : cx;
-    const menuY = verticalTitle ? 824 : cinematicWide ? H - 210 * baseUiScale() : H - 186 * baseUiScale();
+    const menuY = verticalTitle ? H - 142 * baseUiScale() : cinematicWide ? H - 210 * baseUiScale() : H - 186 * baseUiScale();
     let titleBank = null;
     if (bankShards !== null) {
       const bankValue = Math.max(0, Math.round(Number(bankShards) || 0));
@@ -1396,250 +1511,176 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     ctx.restore();
   }
 
+  function drawMenuHero(weaponId, cx, groundY, height, t = 0, maxWidth = Infinity) {
+    const sprite = sprites[`idle_${weaponId}_v1`];
+    if (!sprite) return null;
+    const frame = idleFrameAt(t);
+    const crop = { chokento: [28, 210, 306, 498], katana: [104, 174, 327, 498], axe: [96, 210, 377, 498], spear: [110, 118, 318, 498], bow: [161, 98, 449, 498] }[weaponId] || [0, 0, 480, 528];
+    const sourceW = crop[2] - crop[0], sourceH = crop[3] - crop[1];
+    const drawScale = Math.min(height / 350 * weaponCharacterScale(weaponId), maxWidth / sourceW, height / sourceH);
+    const w = sourceW * drawScale, h = sourceH * drawScale;
+    const x = cx - w / 2, y = groundY - (488 - crop[1]) * drawScale;
+    const footX = x + (264 - crop[0]) * drawScale;
+    ctx.save();
+    ctx.fillStyle = "rgba(3,10,26,0.38)";
+    ctx.beginPath();
+    ctx.ellipse(footX, groundY + 3 * drawScale, 48 * drawScale, 7 * drawScale, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(sprite, frame % 4 * 480 + crop[0], Math.floor(frame / 4) * 528 + crop[1], sourceW, sourceH, x, y, w, h);
+    ctx.restore();
+    return { x, y, w, h, weaponId, frame, groundY };
+  }
+
+  function menuWash(strength = 0.4) {
+    ctx.save();
+    const wash = ctx.createLinearGradient(0, 0, 0, H);
+    wash.addColorStop(0, `rgba(5,16,40,${strength})`);
+    wash.addColorStop(0.45, "rgba(8,22,49,0.12)");
+    wash.addColorStop(1, "rgba(3,11,29,0.8)");
+    ctx.fillStyle = wash;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
   function drawPreparation({
-    section = "main",
-    weapon = null,
-    bankShards = 0,
-    ticketStock = 0,
-    carryTickets = 0,
-    carryLimit = 2,
-    freeRerolls = 1,
-    growthItems = [],
-    ticketPrice = 50,
-    focusedIndex = 0,
-    notice = "",
-    saveError = "",
-    canTransact = true,
-    enterT = 0,
+    section = "main", weapon = null, bankShards = 0, ticketStock = 0,
+    carryTickets = 0, carryLimit = 2, freeRerolls = 1, growthItems = [],
+    ticketPrice = 50, focusedIndex = 0, notice = "", saveError = "",
+    canTransact = true, enterT = 0, t = 0,
+    assetsReady = true, assetsLoading = false, assetsFailed = false,
   } = {}) {
-    const mobile = isMobileLayout();
-    const landscape = isShortLandscape();
-    const bounds = landscape ? shortLandscapeBounds(760) : safeBounds();
-    const cx = bounds.cx;
-    const scale = landscape
-      ? baseUiScale()
-      : Math.min(sceneUiScale(), H / (mobile ? 690 : 720));
+    const mobile = isMobileLayout(), landscape = isShortLandscape();
+    const bounds = landscape ? shortLandscapeBounds(900) : safeBounds();
+    const cx = bounds.cx, scale = baseUiScale();
+    const height = H / scale;
     const balance = Math.max(0, Math.round(Number(bankShards) || 0));
     const stock = Math.max(0, Math.round(Number(ticketStock) || 0));
-    const carried = Math.max(0, Math.min(Math.round(Number(carryLimit) || 0), Math.round(Number(carryTickets) || 0)));
     const limit = Math.max(0, Math.round(Number(carryLimit) || 0));
-    const requestedFocus = Math.max(0, Math.round(Number(focusedIndex) || 0));
+    const carried = clamp(Math.round(Number(carryTickets) || 0), 0, limit);
+    const free = Math.max(0, Math.round(Number(freeRerolls) || 0));
     const canWrite = canTransact !== false;
-    const growth = (Array.isArray(growthItems) && growthItems.length ? growthItems : [
-      { id: "hp", name: "최대 체력", level: 0, maxLevel: 3, current: 100, next: 105, cost: 150 },
-      { id: "guard", name: "최대 방어", level: 0, maxLevel: 3, current: 100, next: 105, cost: 150 },
-    ]).slice(0, 2).map((item, index) => {
-      const level = Math.max(0, Math.round(Number(item.level) || 0));
-      const maxLevel = Math.max(level, Math.round(Number(item.maxLevel) || 3));
-      const maxed = item.maxed === true || level >= maxLevel;
-      const cost = Math.max(0, Math.round(Number(item.cost) || 0));
-      return {
-        ...item,
-        id: item.id || (index === 0 ? "hp" : "guard"),
-        name: item.name || (index === 0 ? "최대 체력" : "최대 방어"),
-        level,
-        maxLevel,
-        maxed,
-        cost,
-        canBuy: canWrite && (item.canBuy === undefined ? !maxed && balance >= cost : Boolean(item.canBuy)),
-      };
-    });
-    const focusOrders = {
-      main: ["weapon", "growth", "tickets", "carryLess", "carryMore", "start", "back"],
-      growth: ["buyHp", "buyGuard", "home"],
-      tickets: ["buyTicket", "home"],
-    };
-    const focusOrder = focusOrders[section] || focusOrders.main;
-    const focus = Math.min(Math.max(0, focusOrder.length - 1), requestedFocus);
+    const growth = growthItems.map(item => ({
+      ...item,
+      maxed: item.maxed === true || item.level >= item.maxLevel,
+      canBuy: canWrite && !item.maxed && item.level < item.maxLevel && balance >= item.cost,
+    }));
+    const orders = { main: ["weapon", "growth", "tickets", "carryLess", "carryMore", "start", "back"], growth: ["buyHp", "buyGuard", "home"] };
+    const focusOrder = orders[section] || orders.main;
+    const focus = clamp(Math.round(focusedIndex) || 0, 0, focusOrder.length - 1);
     const selected = id => focusOrder[focus] === id;
     const boxes = {};
-
-    const titleY = (landscape ? 31 : mobile ? 46 : 48) * scale;
-    text(section === "growth" ? "영구 성장" : section === "tickets" ? "리롤권 상점" : "모험 준비", cx, titleY, {
-      size: (landscape ? 24 : mobile ? 27 : 31) * scale,
-      color: "#fff5da", font: SERIF, weight: 900, align: "center", spacing: 4 * scale, stroke: true,
-    });
-    ornament(cx, titleY + (landscape ? 14 : 18) * scale, (landscape ? 100 : 126) * scale);
-    const bankY = titleY + (landscape ? 29 : 39) * scale;
-    const bankText = `보관 파편 ${balance.toLocaleString("ko-KR")}  ·  리롤권 ${stock.toLocaleString("ko-KR")}`;
-    const bankSize = fitTextSize(bankText, (landscape ? 11 : 12.5) * scale, Math.min(bounds.width - 56 * scale, 330 * scale), { weight: 900 });
-    const bankWidth = measureTextWidth(bankText, { size: bankSize, weight: 900 });
-    crystalIcon(cx - bankWidth / 2 - 12 * scale, bankY - 4 * scale, 6 * scale, "#8fe3ff");
-    text(bankText, cx, bankY, { size: bankSize, color: "#bfeeff", weight: 900, align: "center" });
-
-    const drawWeaponSummary = (box, focusId = "weapon") => {
-      const active = selected(focusId);
-      panel(box.x, box.y, box.w, box.h, { alpha: active ? 0.88 : 0.7, border: active ? GOLD : GOLD_DIM, radius: 10 * scale });
-      const weaponId = weapon?.id || "chokento";
-      const iconSize = Math.min(box.h * 0.52, (landscape ? 76 : 88) * scale);
-      const iconX = box.x + Math.min(box.w * 0.24, 86 * scale);
-      const iconY = box.y + box.h / 2;
-      if (sprites[WEAPON_SPRITE[weaponId]]) weaponIcon(weaponId, iconX, iconY, iconSize, { rotation: weaponId === "chokento" || weaponId === "katana" ? -Math.PI * 3 / 4 : 0 });
-      const textX = box.x + Math.min(box.w * 0.43, 154 * scale);
-      text("선택한 무기", textX, box.y + 28 * scale, { size: 10.5 * scale, color: MUTED, weight: 800 });
-      text(weapon?.name || WEAPON_LABEL[weaponId] || "장검", textX, box.y + 57 * scale, {
-        size: fitTextSize(weapon?.name || WEAPON_LABEL[weaponId] || "장검", 21 * scale, box.x + box.w - textX - 18 * scale, { font: SERIF, weight: 900 }),
-        color: active ? GOLD : "#fff2d0", font: SERIF, weight: 900,
-      });
-      const role = weapon?.role || WEAPON_ROLE[weaponId] || "";
-      if (role) text(role, textX, box.y + 80 * scale, { size: fitTextSize(role, 11.5 * scale, box.x + box.w - textX - 18 * scale), color: "#c6d4e8", weight: 700 });
-      text("눌러서 무기 변경", textX, box.y + box.h - 18 * scale, { size: 10.5 * scale, color: active ? "#ffe2a3" : MUTED, weight: 800 });
-      region(box.x, box.y, box.w, box.h, "preparation:weapon");
-      boxes.weapon = { ...box, selected: active, weaponId };
-    };
-
-    const growthSummary = growth.length
-      ? growth.map((item) => `${mobile && !landscape ? item.name.replace("최대 ", "") : item.name} ${item.level}/${item.maxLevel}`).join(" · ")
-      : "성장 항목 없음";
-    const drawAccessCard = (box, id, titleLabel, detail, iconName) => {
-      const active = selected(id);
-      const compactCard = mobile && !landscape && box.w < 220 * scale;
-      panel(box.x, box.y, box.w, box.h, { alpha: active ? 0.86 : 0.65, border: active ? GOLD : "rgba(150,170,205,0.34)", radius: 9 * scale });
-      drawUiIcon(iconName, box.x + (compactCard ? 25 : 27) * scale, box.y + (compactCard ? 29 * scale : box.h / 2), 31 * scale, { alpha: active ? 1 : 0.78 });
-      text(titleLabel, box.x + (compactCard ? 48 : 51) * scale, box.y + 30 * scale, { size: 14 * scale, color: active ? "#fff2c8" : TEXT, weight: 900 });
-      text(detail, compactCard ? box.x + box.w / 2 : box.x + 51 * scale, box.y + (compactCard ? 76 : 53) * scale, {
-        size: fitTextSize(detail, 10.5 * scale, compactCard ? box.w - 20 * scale : box.w - 66 * scale),
-        color: active ? "#ffe2a3" : MUTED, weight: 700, align: compactCard ? "center" : "left",
-      });
-      region(box.x, box.y, box.w, box.h, `preparation:${id}`);
-      boxes[id] = { ...box, selected: active };
-    };
-
+    const contentW = Math.min(bounds.width - 32 * scale, (mobile ? 480 : 880) * scale);
+    const left = cx - contentW / 2;
+    const title = section === "growth" ? "영구 성장" : "모험 준비";
+    menuWash(0.5);
+    text(title, cx, (landscape ? 34 : 45) * scale, { size: landscape ? 24 * scale : 27 * scale, font: SERIF, weight: 900, color: "#fff2d0", align: "center", spacing: 2 * scale });
+    if (section !== "main") text(`파편 ${balance.toLocaleString("ko-KR")}`, cx, (landscape ? 58 : 77) * scale, { size: 14 * scale, color: "#b8d8ed", align: "center", weight: 700 });
+    let hero = null;
     if (section === "main") {
-      if (landscape) {
-        const top = 77 * scale;
-        const gap = 14 * scale;
-        const leftW = 350 * scale;
-        const rightX = bounds.right - 382 * scale;
-        drawWeaponSummary({ x: bounds.left, y: top, w: leftW, h: 184 * scale });
-        drawAccessCard({ x: rightX, y: top, w: 382 * scale, h: 72 * scale }, "growth", "영구 성장", growthSummary, "hp");
-        drawAccessCard({ x: rightX, y: top + 82 * scale, w: 382 * scale, h: 72 * scale }, "tickets", "리롤권 구매", `1장 ${Math.max(0, Number(ticketPrice) || 0).toLocaleString("ko-KR")} 파편 · 보유 ${stock}`, "reroll");
-        const carryY = top + 164 * scale;
-        const carryW = 382 * scale;
-        panel(rightX, carryY, carryW, 64 * scale, { alpha: 0.68, border: "rgba(143,227,255,0.34)", radius: 9 * scale });
-        text(`다음 모험 반입  ${carried}/${limit}`, rightX + 18 * scale, carryY + 24 * scale, { size: 12 * scale, color: "#bfeeff", weight: 900 });
-        text(`무료 ${Math.max(0, Number(freeRerolls) || 0)}회 + 구매권`, rightX + 18 * scale, carryY + 47 * scale, { size: 10.5 * scale, color: MUTED, weight: 700 });
-        boxes.carryLess = outlinedActionButton(rightX + carryW - 82 * scale, carryY + 32 * scale, 48 * scale, 42 * scale, "−", "preparation:carryLess", { selected: selected("carryLess"), disabled: !canWrite || carried <= 0, scale, fontSize: 19 });
-        boxes.carryMore = outlinedActionButton(rightX + carryW - 29 * scale, carryY + 32 * scale, 48 * scale, 42 * scale, "+", "preparation:carryMore", { selected: selected("carryMore"), disabled: !canWrite || carried >= Math.min(limit, stock), scale, fontSize: 19 });
-        const footerY = 334 * scale;
-        boxes.back = outlinedActionButton(cx - 207 * scale, footerY, 174 * scale, 44 * scale, "타이틀로", "preparation:back", { selected: selected("back"), scale, fontSize: 13 });
-        boxes.start = outlinedActionButton(cx + 90 * scale, footerY, 406 * scale, 48 * scale, `모험 시작 · 리롤 ${Math.max(0, Number(freeRerolls) || 0) + carried}회`, "preparation:start", { selected: selected("start"), disabled: !canWrite, scale, fontSize: 15 });
-      } else if (mobile) {
-        const contentW = Math.min(bounds.width - 28 * scale, 520 * scale);
-        const left = cx - contentW / 2;
-        const weaponY = 105 * scale;
-        drawWeaponSummary({ x: left, y: weaponY, w: contentW, h: 128 * scale });
-        const gap = 10 * scale;
-        const cardW = (contentW - gap) / 2;
-        drawAccessCard({ x: left, y: 247 * scale, w: cardW, h: 104 * scale }, "growth", "영구 성장", growthSummary, "hp");
-        drawAccessCard({ x: left + cardW + gap, y: 247 * scale, w: cardW, h: 104 * scale }, "tickets", "리롤권", `1장 ${Math.max(0, Number(ticketPrice) || 0)} 파편`, "reroll");
-        const carryY = 365 * scale;
-        panel(left, carryY, contentW, 82 * scale, { alpha: 0.68, border: "rgba(143,227,255,0.34)", radius: 9 * scale });
-        text(`다음 모험 반입  ${carried}/${limit}`, left + 18 * scale, carryY + 30 * scale, { size: 13 * scale, color: "#bfeeff", weight: 900 });
-        text(`무료 ${Math.max(0, Number(freeRerolls) || 0)}회 + 구매권 ${carried}장`, left + 18 * scale, carryY + 57 * scale, { size: 11 * scale, color: MUTED, weight: 700 });
-        boxes.carryLess = outlinedActionButton(left + contentW - 84 * scale, carryY + 41 * scale, 48 * scale, 48 * scale, "−", "preparation:carryLess", { selected: selected("carryLess"), disabled: !canWrite || carried <= 0, scale, fontSize: 20 });
-        boxes.carryMore = outlinedActionButton(left + contentW - 30 * scale, carryY + 41 * scale, 48 * scale, 48 * scale, "+", "preparation:carryMore", { selected: selected("carryMore"), disabled: !canWrite || carried >= Math.min(limit, stock), scale, fontSize: 20 });
-        const message = saveError || notice;
-        if (message) text(message, cx, 472 * scale, { size: fitTextSize(message, 11 * scale, contentW), color: saveError ? "#ffaaaa" : "#b9c9e1", align: "center", weight: 750 });
-        boxes.start = outlinedActionButton(cx, 526 * scale, Math.min(contentW, 300 * scale), 58 * scale, `모험 시작 · 리롤 ${Math.max(0, Number(freeRerolls) || 0) + carried}회`, "preparation:start", { selected: selected("start"), disabled: !canWrite, scale, fontSize: 17 });
-        boxes.back = outlinedActionButton(cx, 602 * scale, Math.min(contentW, 210 * scale), 44 * scale, "타이틀로", "preparation:back", { selected: selected("back"), scale, fontSize: 12.5 });
-      } else {
-        const contentW = Math.min(bounds.width - 44 * scale, 850 * scale);
-        const left = cx - contentW / 2;
-        const gap = 18 * scale;
-        const leftW = 370 * scale;
-        const rightW = contentW - leftW - gap;
-        const top = 118 * scale;
-        drawWeaponSummary({ x: left, y: top, w: leftW, h: 300 * scale });
-        drawAccessCard({ x: left + leftW + gap, y: top, w: rightW, h: 94 * scale }, "growth", "영구 성장", growthSummary, "hp");
-        drawAccessCard({ x: left + leftW + gap, y: top + 108 * scale, w: rightW, h: 94 * scale }, "tickets", "리롤권 구매", `1장 ${Math.max(0, Number(ticketPrice) || 0).toLocaleString("ko-KR")} 파편 · 보유 ${stock}`, "reroll");
-        const carryY = top + 216 * scale;
-        panel(left + leftW + gap, carryY, rightW, 84 * scale, { alpha: 0.68, border: "rgba(143,227,255,0.34)", radius: 9 * scale });
-        text(`다음 모험 반입  ${carried}/${limit}`, left + leftW + gap + 18 * scale, carryY + 31 * scale, { size: 13 * scale, color: "#bfeeff", weight: 900 });
-        text(`무료 ${Math.max(0, Number(freeRerolls) || 0)}회 + 구매권 ${carried}장`, left + leftW + gap + 18 * scale, carryY + 59 * scale, { size: 11 * scale, color: MUTED, weight: 700 });
-        boxes.carryLess = outlinedActionButton(left + contentW - 88 * scale, carryY + 42 * scale, 48 * scale, 48 * scale, "−", "preparation:carryLess", { selected: selected("carryLess"), disabled: !canWrite || carried <= 0, scale, fontSize: 20 });
-        boxes.carryMore = outlinedActionButton(left + contentW - 32 * scale, carryY + 42 * scale, 48 * scale, 48 * scale, "+", "preparation:carryMore", { selected: selected("carryMore"), disabled: !canWrite || carried >= Math.min(limit, stock), scale, fontSize: 20 });
-        const message = saveError || notice;
-        if (message) text(message, cx, 456 * scale, { size: fitTextSize(message, 11.5 * scale, contentW), color: saveError ? "#ffaaaa" : "#b9c9e1", align: "center", weight: 750 });
-        boxes.start = outlinedActionButton(cx, 512 * scale, 350 * scale, 58 * scale, `모험 시작 · 리롤 ${Math.max(0, Number(freeRerolls) || 0) + carried}회`, "preparation:start", { selected: selected("start"), disabled: !canWrite, scale, fontSize: 18 });
-        boxes.back = outlinedActionButton(cx, 581 * scale, 190 * scale, 42 * scale, "타이틀로", "preparation:back", { selected: selected("back"), scale, fontSize: 12.5 });
+      const weaponId = weapon?.id || "chokento";
+      const stack = mobile && !landscape;
+      const heroHeight = (stack ? clamp(height - 440, 128, 320) : landscape ? height - 148 : Math.min(height - 280, 390)) * scale;
+      const groundY = stack ? 62 * scale + heroHeight : (landscape ? height - 77 : height - 208) * scale;
+      const heroCx = stack ? cx : left + contentW * 0.24;
+      if (sprites.bg_stage_v3 && !landscape) {
+        const stage = sprites.bg_stage_v3;
+        ctx.save();
+        const earth = ctx.createLinearGradient(0, groundY, 0, H);
+        earth.addColorStop(0, "rgba(9,20,37,0.32)");
+        earth.addColorStop(0.55, "rgba(6,17,38,0.83)");
+        earth.addColorStop(1, "#050e24");
+        ctx.fillStyle = earth;
+        ctx.fillRect(0, groundY, W, H - groundY);
+        ctx.globalAlpha = 0.68;
+        ctx.drawImage(stage, 0, 746, stage.width, Math.min(90, stage.height - 746), bounds.left, groundY, bounds.width, 29 * scale);
+        ctx.restore();
       }
-    } else if (section === "growth") {
-      const contentW = Math.min(bounds.width - 32 * scale, (landscape ? 730 : mobile ? 520 : 820) * scale);
-      const left = cx - contentW / 2;
-      const gap = (landscape ? 14 : 18) * scale;
-      const horizontal = landscape || !mobile;
-      const top = (landscape ? 82 : 126) * scale;
-      const cardW = horizontal ? (contentW - gap) / 2 : contentW;
-      const cardH = (landscape ? 198 : mobile ? 172 : 250) * scale;
-      growth.forEach((item, index) => {
-        const focusId = index === 0 ? "buyHp" : "buyGuard";
-        const x = horizontal ? left + index * (cardW + gap) : left;
-        const y = horizontal ? top : top + index * (cardH + gap);
-        panel(x, y, cardW, cardH, { alpha: selected(focusId) ? 0.88 : 0.7, border: selected(focusId) ? GOLD : GOLD_DIM, radius: 10 * scale });
-        drawUiIcon(index === 0 ? "hp" : "guard", x + 35 * scale, y + 38 * scale, 42 * scale, { alpha: 0.92 });
-        text(item.name, x + 66 * scale, y + 35 * scale, { size: 18 * scale, color: selected(focusId) ? GOLD : "#fff2d0", font: SERIF, weight: 900 });
-        text(`단계 ${item.level}/${item.maxLevel}`, x + 66 * scale, y + 57 * scale, { size: 10.5 * scale, color: MUTED, weight: 800 });
-        const current = Number.isFinite(Number(item.current)) ? Number(item.current) : 100 + item.level * 5;
-        const next = Number.isFinite(Number(item.next)) ? Number(item.next) : current + 5;
-        text(item.maxed ? `현재 ${current} · 최대 단계` : `현재 ${current}  →  구매 후 ${next}`, x + cardW / 2, y + (landscape ? 92 : 96) * scale, {
-          size: fitTextSize(item.maxed ? `현재 ${current} · 최대 단계` : `현재 ${current}  →  구매 후 ${next}`, 14 * scale, cardW - 34 * scale),
-          color: item.maxed ? "#b9c9e1" : "#bcebb6", weight: 900, align: "center",
-        });
-        const label = item.maxed ? "최대 단계"
-          : !canWrite ? "저장 사용 불가"
-          : item.canBuy ? `강화 · ${item.cost.toLocaleString("ko-KR")} 파편`
-            : `파편 부족 · ${item.cost.toLocaleString("ko-KR")}`;
-        const actionId = `preparation:${focusId}`;
-        boxes[focusId] = outlinedActionButton(x + cardW / 2, y + cardH - 38 * scale, cardW - 34 * scale, 48 * scale, label, actionId, {
-          selected: selected(focusId), disabled: item.maxed || !item.canBuy, scale, fontSize: 12.5,
-        });
-        boxes[focusId].itemId = item.id;
-      });
-      const message = saveError || notice || "구매한 성장은 다음 모험부터 적용됩니다";
-      const noteY = horizontal ? top + cardH + 26 * scale : top + cardH * 2 + gap + 25 * scale;
-      text(message, cx, noteY, { size: fitTextSize(message, 11.5 * scale, contentW), color: saveError ? "#ffaaaa" : MUTED, align: "center", weight: 750 });
-      const homeY = landscape ? 335 * scale : Math.min(noteY + 54 * scale, H - 42 * scale);
-      boxes.home = outlinedActionButton(cx, homeY, 210 * scale, 44 * scale, "모험 준비로", "preparation:home", { selected: selected("home"), scale, fontSize: 13 });
+      hero = drawMenuHero(weaponId, heroCx, groundY, heroHeight, t, stack ? contentW * 0.94 : contentW * 0.47);
+      if (!hero) text(assetsFailed ? "장비를 불러오지 못했습니다" : "장비 준비 중", heroCx, groundY - heroHeight / 2, { size: 14 * scale, align: "center", color: MUTED });
+      const weaponY = groundY + (landscape ? 41 : 54) * scale;
+      const weaponName = weapon?.name || WEAPON_LABEL[weaponId] || "장검";
+      const nameWidth = measureTextWidth(weaponName, { size: 22 * scale, font: SERIF, weight: 900 });
+      const changeWidth = measureTextWidth("변경 ›", { size: 14 * scale, weight: 750 });
+      const weaponContentW = nameWidth + 20 * scale + changeWidth;
+      const weaponW = Math.max(176 * scale, weaponContentW + 48 * scale);
+      const nameX = heroCx - weaponContentW / 2;
+      boxes.weapon = outlinedActionButton(heroCx, weaponY, weaponW, (landscape ? 44 : 48) * scale, "", "preparation:weapon", { selected: selected("weapon"), scale });
+      text(weaponName, nameX, weaponY + 8 * scale, { size: 22 * scale, font: SERIF, color: "#fff2d0", weight: 900 });
+      text("변경 ›", nameX + nameWidth + 20 * scale, weaponY + 6 * scale, { size: 14 * scale, color: selected("weapon") ? "#fff2d0" : MUTED, weight: 750 });
+      boxes.weapon.weaponId = weaponId;
+      boxes.weapon.label = `${weaponName} · 변경`;
+      const navX = stack ? left : left + contentW * 0.52;
+      const navW = stack ? contentW : contentW * 0.48;
+      const navY = stack ? groundY + 116 * scale : (landscape ? 100 : Math.max(170, height * 0.34)) * scale;
+      const navH = (landscape ? 78 : 90) * scale;
+      const navGap = 12 * scale;
+      const navCardW = (navW - navGap) / 2;
+      text(`파편 ${balance.toLocaleString("ko-KR")}`, navX + navW / 2, navY - 12 * scale, { size: 14 * scale, color: "#b8d8ed", align: "center", weight: 750 });
+      const access = (id, x, label, details, icon, disabled = false) => {
+        const box = outlinedActionButton(x + navCardW / 2, navY + navH / 2, navCardW, navH, "", `preparation:${id}`, { selected: selected(id), disabled, scale });
+        drawUiIcon(icon, x + 20 * scale, navY + (landscape ? 19 : 23) * scale, 25 * scale, { alpha: disabled ? 0.5 : 0.9 });
+        text(label, x + 39 * scale, navY + (landscape ? 24 : 28) * scale, { size: 15 * scale, weight: 800, color: disabled ? "#94a7c2" : selected(id) ? "#fff2d0" : TEXT });
+        details.forEach((detail, index) => text(detail, x + navCardW / 2, navY + ((landscape ? 47 : 53) + index * (landscape ? 18 : 21)) * scale, { size: fitTextSize(detail, 13 * scale, navCardW - 18 * scale), color: MUTED, align: "center" }));
+        boxes[id] = box;
+      };
+      access("growth", navX, "성장", growth.map(item => `${item.name.replace("최대 ", "")} ${item.level}/${item.maxLevel}`), "hp");
+      const canBuyTicket = canWrite && ticketPrice > 0 && balance >= ticketPrice;
+      const purchaseLabel = !canWrite ? "저장 사용 불가" : canBuyTicket ? `구매 · ${ticketPrice} 파편` : `${ticketPrice} 파편 · ${Math.max(0, ticketPrice - balance)} 부족`;
+      access("tickets", navX + navCardW + navGap, "새로고침", [`보유 ${stock}회`, purchaseLabel], "reroll", !canBuyTicket);
+      boxes.tickets.price = ticketPrice;
+      boxes.tickets.purchaseCount = 1;
+      boxes.tickets.label = purchaseLabel;
+      const carryY = navY + navH + (landscape ? 10 : 17) * scale;
+      text(`새로고침 - 구매 ${carried}/${limit}`, navX + 4 * scale, carryY + 21 * scale, { size: 14 * scale, weight: 800, color: "#d2e7f5" });
+      const rerollSummary = carried ? `새로고침 총 ${free + carried}회 · 무료 ${free} + 구매 ${carried}` : `무료 새로고침 ${free}회`;
+      text(rerollSummary, navX + 4 * scale, carryY + 48 * scale, { size: fitTextSize(rerollSummary, 13 * scale, navW - 8 * scale), color: MUTED });
+      boxes.carryLess = outlinedActionButton(navX + navW - 72 * scale, carryY + 16 * scale, 44 * scale, 44 * scale, "−", "preparation:carryLess", { selected: selected("carryLess"), disabled: !canWrite || carried <= 0, scale, fontSize: 22 });
+      boxes.carryMore = outlinedActionButton(navX + navW - 23 * scale, carryY + 16 * scale, 44 * scale, 44 * scale, "+", "preparation:carryMore", { selected: selected("carryMore"), disabled: !canWrite || carried >= Math.min(limit, stock), scale, fontSize: 22 });
+      const footerCx = stack ? cx : navX + navW / 2;
+      const footerY = stack || landscape ? H - (landscape ? 40 : 64) * scale : Math.min(H - 110 * scale, carryY + 152 * scale);
+      const startLabel = assetsFailed ? "다시 불러오기" : !assetsReady ? "장비 준비 중" : "모험 시작";
+      boxes.start = outlinedActionButton(footerCx, footerY, Math.min(stack ? contentW : navW, 320 * scale), 58 * scale, startLabel, "preparation:start", { selected: selected("start"), disabled: !canWrite || (!assetsReady && !assetsFailed), primary: true, scale, fontSize: 20 });
+      boxes.back = outlinedActionButton(bounds.left + 43 * scale, 30 * scale, 84 * scale, 44 * scale, "이전으로", "preparation:back", { selected: selected("back"), scale, fontSize: 13 });
+      const message = saveError;
+      if (message) text(message, footerCx, stack ? H - 14 * scale : footerY - 46 * scale, { size: fitTextSize(message, 13 * scale, stack ? contentW : navW), color: "#ffaaaa", align: "center" });
     } else {
-      const contentW = Math.min(bounds.width - 34 * scale, (landscape ? 620 : mobile ? 500 : 620) * scale);
-      const left = cx - contentW / 2;
-      const top = (landscape ? 83 : 132) * scale;
-      const cardH = (landscape ? 198 : mobile ? 260 : 280) * scale;
-      panel(left, top, contentW, cardH, { alpha: 0.78, border: selected("buyTicket") ? GOLD : GOLD_DIM, radius: 12 * scale });
-      drawUiIcon("reroll", cx, top + (landscape ? 42 : 50) * scale, 58 * scale, { alpha: 0.96 });
-      text(`리롤권 1장`, cx, top + (landscape ? 82 : 94) * scale, { size: 22 * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center" });
-      text(`${Math.max(0, Math.round(Number(ticketPrice) || 0)).toLocaleString("ko-KR")} 파편`, cx, top + (landscape ? 108 : 124) * scale, { size: 15 * scale, color: GOLD, weight: 900, align: "center" });
-      text(`현재 재고 ${stock}장 · 구매 후 잔액 ${Math.max(0, balance - Math.max(0, Number(ticketPrice) || 0)).toLocaleString("ko-KR")}`, cx, top + (landscape ? 132 : 151) * scale, {
-        size: fitTextSize(`현재 재고 ${stock}장 · 구매 후 잔액 ${Math.max(0, balance - Math.max(0, Number(ticketPrice) || 0)).toLocaleString("ko-KR")}`, 11.5 * scale, contentW - 34 * scale), color: MUTED, weight: 750, align: "center",
-      });
-      const canBuyTicket = canWrite && balance >= Math.max(0, Number(ticketPrice) || 0) && Math.max(0, Number(ticketPrice) || 0) > 0;
-      const ticketLabel = !canWrite ? "저장 사용 불가" : canBuyTicket ? "리롤권 구매" : "파편 부족";
-      boxes.buyTicket = outlinedActionButton(cx, top + cardH - (landscape ? 29 : 39) * scale, contentW - 46 * scale, 50 * scale, ticketLabel, "preparation:buyTicket", {
-        selected: selected("buyTicket"), disabled: !canBuyTicket, scale, fontSize: 14,
-      });
-      const message = saveError || notice || "구매한 권은 준비 화면에서 다음 모험에 반입합니다";
-      text(message, cx, top + cardH + 29 * scale, { size: fitTextSize(message, 11 * scale, contentW), color: saveError ? "#ffaaaa" : MUTED, align: "center", weight: 750 });
-      boxes.home = outlinedActionButton(cx, landscape ? 335 * scale : top + cardH + 81 * scale, 210 * scale, 44 * scale, "모험 준비로", "preparation:home", { selected: selected("home"), scale, fontSize: 13 });
+      const panelW = Math.min(contentW, (landscape ? 750 : mobile ? 480 : 750) * scale);
+      const panelX = cx - panelW / 2;
+      const top = (landscape ? 76 : Math.max(110, Math.min(height * 0.2, 155))) * scale;
+      const bottom = H - (landscape ? 68 : 122) * scale;
+      const horizontal = landscape || !mobile;
+      if (section === "growth") {
+        const gap = 18 * scale;
+        const rowH = Math.min((landscape ? 214 : 244) * scale, horizontal ? bottom - top : (bottom - top - gap) / 2);
+        const cardW = horizontal ? (panelW - gap) / 2 : panelW;
+        growth.forEach((item, i) => {
+          const id = i === 0 ? "buyHp" : "buyGuard";
+          const x = panelX + (horizontal ? i * (cardW + gap) : 0);
+          const y = top + (horizontal ? 0 : i * (rowH + gap));
+          panel(x, y, cardW, rowH, { alpha: 0.62, border: "rgba(184,206,226,.2)", radius: 4 * scale });
+          drawUiIcon(i === 0 ? "hp" : "guard", x + 30 * scale, y + 33 * scale, 32 * scale);
+          text(item.name, x + 55 * scale, y + 35 * scale, { size: 18 * scale, color: "#fff2d0", weight: 800 });
+          text(`${item.level}/${item.maxLevel}`, x + cardW - 20 * scale, y + 35 * scale, { size: 13 * scale, color: MUTED, align: "right" });
+          text(item.maxed ? `${item.current} · 최대 단계` : `${item.current}  →  ${item.next}`, x + cardW / 2, y + rowH * 0.47, { size: 24 * scale, color: "#c6edc5", weight: 800, align: "center" });
+          const detail = item.maxed ? "성장 완료" : item.canBuy ? `구매 후 ${(balance - item.cost).toLocaleString("ko-KR")} 파편` : `${Math.max(0, item.cost - balance).toLocaleString("ko-KR")} 파편 부족`;
+          text(detail, x + cardW / 2, y + rowH * 0.64, { size: 13 * scale, color: MUTED, align: "center" });
+          const label = item.maxed ? "최대 단계" : !canWrite ? "저장 사용 불가" : `성장 · ${item.cost.toLocaleString("ko-KR")} 파편`;
+          boxes[id] = outlinedActionButton(x + cardW / 2, y + rowH - 28 * scale, cardW - 20 * scale, 46 * scale, label, `preparation:${id}`, { selected: selected(id), disabled: item.maxed || !item.canBuy, scale, fontSize: 15 });
+          boxes[id].itemId = item.id;
+        });
+      }
+      const message = saveError || notice || (section === "growth" ? "다음 모험부터 적용" : "");
+      text(message, cx, H - (landscape ? 56 : 92) * scale, { size: fitTextSize(message, 13 * scale, panelW), color: saveError ? "#ffaaaa" : MUTED, align: "center" });
+      boxes.home = outlinedActionButton(cx, H - (landscape ? 25 : 51) * scale, 220 * scale, 44 * scale, "이전으로", "preparation:home", { selected: selected("home"), scale, fontSize: 15 });
     }
-
     metrics.preparation = {
-      section,
-      focusedIndex: focus,
-      focusedId: focusOrder[focus] || null,
-      focusOrder,
-      balance,
-      ticketStock: stock,
-      carryTickets: carried,
-      carryLimit: limit,
-      freeRerolls: Math.max(0, Math.round(Number(freeRerolls) || 0)),
+      section, focusedIndex: focus, focusedId: focusOrder[focus] || null, focusOrder,
+      balance, ticketStock: stock, carryTickets: carried, carryLimit: limit, freeRerolls: free,
       growthItems: growth.map(({ id, name, level, maxLevel, maxed, cost, canBuy }) => ({ id, name, level, maxLevel, maxed, cost, canBuy })),
-      boxes,
-      notice: saveError || notice || null,
-      saveError: saveError || null,
-      canTransact: canWrite,
-      enterT: Number(enterT) || 0,
-      landscape,
+      boxes, hero, notice: (section === "main" ? saveError : saveError || notice) || null, saveError: saveError || null,
+      canTransact: canWrite, enterT: Number(enterT) || 0, landscape,
+      assetsReady, assetsLoading, assetsFailed,
     };
   }
 
@@ -1676,327 +1717,215 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     return `${(1 / cooldown).toFixed(1)}회/초`;
   }
 
-  function drawWeaponSelectLandscape({
-    weapons,
-    index,
-    t,
-    deniedT,
-    assetsLoading,
-    assetsFailed,
-    preparation,
-  }) {
-    const bounds = shortLandscapeBounds(760);
-    const cx = bounds.cx;
-    const scale = baseUiScale();
-    const prep = preparation || null;
-    text("무기 선택", cx, 33 * scale, {
-      size: 25 * scale, color: "#fff5da", font: SERIF, weight: 900, align: "center", spacing: 4 * scale, stroke: true,
-    });
-    ornament(cx, 49 * scale, 100 * scale);
-    const status = assetsLoading ? "모험 장비를 준비하는 중"
-      : assetsFailed ? "선택을 눌러 다시 시도해주세요"
-        : prep ? `보관 파편 ${Math.max(0, Number(prep.bankShards) || 0).toLocaleString("ko-KR")} · 리롤권 ${Math.max(0, Number(prep.ticketStock) || 0)} · 반입 ${Math.max(0, Number(prep.carryTickets) || 0)}` : "";
-    if (status) text(status, cx, 65 * scale, {
-      size: fitTextSize(status, 10.5 * scale, 420 * scale), color: assetsFailed ? "#ffaaaa" : prep ? "#bfeeff" : "#ffe2a3", weight: 800, align: "center",
-    });
-
-    const gap = 8 * scale;
-    const slotY = 76 * scale;
-    const slotH = 126 * scale;
-    const slotW = (bounds.width - gap * Math.max(0, weapons.length - 1)) / Math.max(1, weapons.length);
-    const slotBoxes = [];
-    weapons.forEach((weapon, i) => {
-      const enter = clamp((t - i * 0.05) / 0.3, 0, 1);
-      const selected = i === index;
-      const x = bounds.left + i * (slotW + gap);
-      const shake = selected && weapon.locked && deniedT > 0 ? Math.sin(t * 60) * 3 * scale : 0;
-      const y = slotY + (1 - easeOutCubic(enter)) * 14 * scale;
-      ctx.save();
-      ctx.globalAlpha = enter;
-      drawUiFrame("weaponFrame", x + shake, y, slotW, slotH, { alpha: selected ? 1 : weapon.locked ? 0.36 : 0.58 });
-      const cardCx = x + shake + slotW / 2;
-      const iconSize = (selected ? 58 : 51) * scale;
-      const iconY = y + 47 * scale;
-      if (sprites[WEAPON_SPRITE[weapon.id]]) weaponIcon(weapon.id, cardCx, iconY, iconSize, {
-        rotation: weapon.id === "chokento" || weapon.id === "katana" ? -Math.PI * 3 / 4 : 0,
-      });
-      const nameSize = fitTextSize(weapon.name, (selected ? 15 : 13.5) * scale, slotW - 14 * scale, { weight: 900 });
-      text(weapon.name, cardCx, y + 106 * scale, { size: nameSize, color: selected ? GOLD : weapon.locked ? MUTED : TEXT, weight: 900, align: "center", stroke: true });
-      if (weapon.locked) drawUiIcon("lock", x + slotW - 16 * scale, y + 17 * scale, 24 * scale, { alpha: 0.86 });
-      ctx.restore();
-      region(x, y, slotW, slotH, `weapon:${i}`);
-      slotBoxes.push({
-        x, y, w: slotW, h: slotH, selected, locked: Boolean(weapon.locked),
-        content: {
-          weapon: { x: cardCx - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize },
-          name: { x: x + 7 * scale, y: y + 88 * scale, w: slotW - 14 * scale, h: 22 * scale },
-          lock: weapon.locked ? { x: x + slotW - 29 * scale, y: y + 5 * scale, w: 26 * scale, h: 26 * scale } : null,
-        },
-      });
-    });
-
-    const sel = weapons[index] || weapons[0];
-    const infoY = 212 * scale;
-    const infoH = 70 * scale;
-    const infoW = bounds.width;
-    panel(bounds.left, infoY, infoW, infoH, { alpha: 0.58, border: sel?.locked ? "rgba(255,122,122,0.45)" : GOLD_DIM, radius: 8 * scale });
-    const infoTitle = sel?.locked ? `${sel.name} · 잠김` : sel?.name || "장검";
-    text(infoTitle, bounds.left + 18 * scale, infoY + 27 * scale, { size: 18 * scale, color: sel?.locked ? "#ffaaaa" : GOLD, font: SERIF, weight: 900 });
-    const detail = sel?.locked ? (sel.unlock?.label || "도전을 계속하면 해금") : (sel?.role || WEAPON_ROLE[sel?.id] || "");
-    text(detail, bounds.left + 18 * scale, infoY + 52 * scale, { size: fitTextSize(detail, 10.5 * scale, 295 * scale), color: sel?.locked ? "#ffe2a3" : "#c6d4e8", weight: 700 });
-    const stats = [
-      ["공격", String(Math.round(sel?.damage || 0))],
-      ["사거리", String(Math.round(sel?.range || 0))],
-      ["공속", sel ? attackSpeedLabel(sel) : "—"],
-    ];
-    const statsLeft = bounds.right - 390 * scale;
-    stats.forEach(([label, value], i) => {
-      const x = statsLeft + i * 126 * scale;
-      text(label, x, infoY + 25 * scale, { size: 10 * scale, color: MUTED, weight: 800 });
-      text(value, x, infoY + 51 * scale, { size: 14 * scale, color: "#fff2d0", weight: 900 });
-    });
-
-    let preparationBox = null;
-    if (prep) {
-      preparationBox = outlinedActionButton(cx - 224 * scale, 332 * scale, 196 * scale, 46 * scale, "모험 준비로", "weapon:preparation", { scale, fontSize: 13 });
-    }
-    const confirmW = prep ? 420 * scale : 360 * scale;
-    const confirmCx = prep ? cx + 112 * scale : cx;
-    const confirmBox = outlinedActionButton(confirmCx, 332 * scale, confirmW, 48 * scale,
-      assetsFailed ? "다시 시도" : prep ? "이 무기로 준비" : "선    택", "weapon:confirm", {
-        selected: assetsFailed || (!sel?.locked && !assetsLoading), scale, fontSize: 16,
-      });
-    metrics.weaponSelect = {
-      assetsLoading,
-      assetsFailed,
-      role: sel?.role || WEAPON_ROLE[sel?.id] || "",
-      unlockProgress: sel?.unlockProgress || null,
-      title: { x: cx - 120 * scale, y: 8 * scale, w: 240 * scale, h: 60 * scale },
-      slots: slotBoxes,
-      info: { x: bounds.left, y: infoY, w: infoW, h: infoH, content: {} },
-      confirm: confirmBox,
-      preparation: prep ? { ...prep, access: preparationBox } : null,
-      landscape: true,
-    };
+  function drawWeaponSelectLandscape(data) {
+    drawWeaponSelectionComposition(data, true);
   }
 
-  function drawWeaponSelect({
-    weapons,
-    index,
-    t,
-    deniedT,
-    assetsLoading = false,
-    assetsFailed = false,
-    preparation = null,
-    bankShards = null,
-    ticketStock = null,
-    carryTickets = null,
-  }) {
-    const preparationSummary = preparation || (bankShards !== null || ticketStock !== null || carryTickets !== null ? {
-      bankShards: Math.max(0, Number(bankShards) || 0),
-      ticketStock: Math.max(0, Number(ticketStock) || 0),
+  function drawWeaponSelectionComposition({
+    weapons = [], index = 0, t = 0, deniedT = 0, assetsLoading = false, assetsFailed = false,
+    preparation = null, bankShards = null, ticketStock = null, carryTickets = null,
+  }, landscape = false) {
+    const prep = preparation || (bankShards !== null || ticketStock !== null || carryTickets !== null ? {
+      bankShards: Math.max(0, Number(bankShards) || 0), ticketStock: Math.max(0, Number(ticketStock) || 0),
       carryTickets: Math.max(0, Number(carryTickets) || 0),
     } : null);
-    if (isShortLandscape()) {
-      drawWeaponSelectLandscape({ weapons, index, t, deniedT, assetsLoading, assetsFailed, preparation: preparationSummary });
-      return;
-    }
-    const bounds = safeBounds();
-    const cx0 = bounds.cx;
-    const mobile = isMobileLayout();
-    const scale = mobile ? Math.min(screenUiScale(), H / 810) : screenUiScale();
-    const titleSize = (mobile ? 26 : 30) * scale;
-    const titleY = mobile ? 52 : isWideLayout() ? 50 : 48;
-    const ornamentY = titleY + 17;
-    const titleOrnamentW = Math.min(bounds.width * 0.54, (mobile ? 250 : 310) * scale);
-    if (!preparationSummary) drawUiFrame("stageOrnament", cx0 - titleOrnamentW / 2, ornamentY * scale, titleOrnamentW, 24 * scale, { alpha: 0.92 });
-    text("무기 선택", cx0, titleY * scale, {
-      size: titleSize, color: "#fff5da", font: SERIF, weight: 900, align: "center", spacing: 5 * scale, stroke: true,
+    const bounds = landscape ? shortLandscapeBounds(780) : safeBounds();
+    const mobile = !landscape && isMobileLayout();
+    const scale = baseUiScale() * (!mobile && !landscape ? Math.min(1.12, (layoutState.cssFrameHeight || 800) / 720) : 1);
+    const cssH = H / scale;
+    const compact = mobile && cssH < 660;
+    const contentW = Math.min(bounds.width - (landscape ? 0 : 24) * scale, (mobile ? 460 : 860) * scale);
+    const left = bounds.cx - contentW / 2;
+    const cx = bounds.cx;
+    const sel = weapons[index] || weapons[0];
+    if (!sel) return;
+    const wash = ctx.createLinearGradient(0, 0, 0, H);
+    wash.addColorStop(0, "rgba(7,13,34,0.16)");
+    wash.addColorStop(0.46, "rgba(7,13,34,0.53)");
+    wash.addColorStop(1, "rgba(7,13,34,0.81)");
+    ctx.fillStyle = wash;
+    ctx.fillRect(0, 0, W, H);
+    const titleY = (landscape ? 29 : compact ? 38 : 47) * scale;
+    text("무기 선택", cx, titleY, {
+      size: (landscape ? 25 : compact ? 25 : 28) * scale, color: "#fff2c8", font: SERIF,
+      weight: 900, align: "center", spacing: 3 * scale,
     });
     let preparationAccess = null;
-    if (preparationSummary) {
-      preparationAccess = outlinedActionButton(bounds.left + 50 * scale, 32 * scale, 86 * scale, 40 * scale, "준비로", "weapon:preparation", {
-        scale, fontSize: 11.5,
-      });
-    }
-    if (assetsLoading) {
-      text("모험 장비를 준비하는 중", cx0, (titleY + 34) * scale, {
-        size: (mobile ? 11.5 : 13.5) * scale, color: "#ffe2a3", weight: 800, align: "center",
-      });
-    } else if (assetsFailed) {
-      text("선택을 눌러 다시 시도해주세요", cx0, (titleY + 34) * scale, {
-        size: (mobile ? 11.5 : 13.5) * scale, color: "#ffb0b3", weight: 800, align: "center",
-      });
-    } else if (preparationSummary) {
-      const prepText = `파편 ${Math.max(0, Number(preparationSummary.bankShards) || 0).toLocaleString("ko-KR")} · 권 ${Math.max(0, Number(preparationSummary.ticketStock) || 0)} · 반입 ${Math.max(0, Number(preparationSummary.carryTickets) || 0)}`;
-      text(prepText, cx0, (titleY + 34) * scale, {
-        size: fitTextSize(prepText, (mobile ? 10.5 : 12.5) * scale, Math.min(bounds.width - 132 * scale, 390 * scale)), color: "#bfeeff", weight: 850, align: "center",
-      });
-    }
+    if (prep) preparationAccess = outlinedActionButton(left + 32 * scale, titleY - 10 * scale,
+      76 * scale, 44 * scale, "이전으로", "weapon:preparation", { scale, fontSize: 12, primary: false });
+    const status = assetsLoading ? "모험 장비를 준비하는 중" : assetsFailed ? "장비를 불러오지 못했습니다 · 다시 시도해 주세요" : "";
+    if (status) text(status, cx, titleY + 23 * scale, {
+      size: (landscape ? 11 : 12) * scale, color: assetsFailed ? "#ffb0b3" : "#ffe2a3", weight: 750, align: "center",
+    });
 
-    const columns = mobile ? 2 : weapons.length;
-    const gapX = (mobile ? 12 : 16) * scale;
-    const maxRowW = Math.max(1, bounds.width - (mobile ? 24 : 42) * scale);
-    const slotW = Math.floor((maxRowW - (columns - 1) * gapX) / columns);
-    const slotH = (mobile ? 116 : 130) * scale;
-    const gapY = mobile ? 12 * scale : 0;
-    const slotY = (mobile ? 103 : isWideLayout() ? 112 : 106) * scale;
+    const gap = (mobile ? 5 : 11) * scale;
+    const slotY = (landscape ? 66 : compact ? 73 : 92) * scale;
+    const slotH = (landscape ? 64 : compact ? 73 : mobile ? 83 : 96) * scale;
+    const slotW = (contentW - gap * Math.max(0, weapons.length - 1)) / Math.max(1, weapons.length);
     const slotBoxes = [];
     weapons.forEach((weapon, i) => {
-      const enter = clamp((t - i * 0.05) / 0.3, 0, 1);
-      const row = Math.floor(i / columns);
-      const col = i % columns;
-      const rowCount = mobile ? Math.min(columns, weapons.length - row * columns) : weapons.length;
-      const rowW = rowCount * slotW + (rowCount - 1) * gapX;
-      const startX = cx0 - rowW / 2;
-      const x = startX + col * (slotW + gapX);
+      const enter = clamp((t - i * 0.04) / 0.24, 0, 1);
       const selected = i === index;
-      const shake = selected && weapon.locked && deniedT > 0 ? Math.sin(t * 60) * 3 * scale : 0;
-      const stanceY = selected ? (mobile ? -4 : -10) : (mobile ? 0 : 6);
-      const y = slotY + row * (slotH + gapY) + (1 - easeOutCubic(enter)) * 24 * scale + stanceY * scale;
-      const displayRotation = weapon.id === "chokento" || weapon.id === "katana" ? -Math.PI * 3 / 4 : 0;
+      const x = left + i * (slotW + gap);
+      const shake = selected && weapon.locked && deniedT > 0 ? Math.sin(t * 60) * 2 * scale : 0;
+      const y = slotY + (1 - easeOutCubic(enter)) * 8 * scale;
+      const cardCx = x + shake + slotW / 2;
+      const iconSize = (landscape ? 29 : compact ? 31 : mobile ? 39 : 51) * scale;
+      const iconY = y + (landscape ? 22 : compact ? 25 : mobile ? 29 : 33) * scale;
+      const nameSize = (mobile ? compact ? 11.5 : 12.5 : landscape ? 13 : 15) * scale;
+      const nameY = y + slotH - (landscape ? 9 : 12) * scale;
+      const rotation = ["chokento", "katana"].includes(weapon.id) ? -Math.PI * 3 / 4 : 0;
       ctx.save();
       ctx.globalAlpha = enter;
       drawUiFrame("weaponFrame", x + shake, y, slotW, slotH, {
-        alpha: selected ? 1 : weapon.locked ? 0.36 : 0.58,
+        alpha: selected ? 1 : weapon.locked ? 0.28 : 0.52,
       });
-      const cx = x + shake + slotW / 2;
-      const weaponSize = selected ? (mobile ? 72 : 84) * scale : (mobile ? 60 : 68) * scale;
-      const weaponY = y + (mobile ? 39 : 43) * scale;
-      weaponIcon(
-        weapon.id,
-        cx,
-        weaponY,
-        weaponSize,
-        { rotation: displayRotation },
-      );
-      const weaponNameSize = (selected
-        ? (mobile ? 16.5 : 19)
-        : (mobile ? 14.5 : 17)) * scale;
-      const weaponNameY = y + (mobile ? 96 : 108) * scale;
-      text(weapon.name, cx, weaponNameY, {
-        size: weaponNameSize,
-        color: selected ? GOLD : weapon.locked ? MUTED : TEXT,
-        align: "center",
-        weight: 900,
-        stroke: true,
+      ctx.globalAlpha *= selected ? 1 : weapon.locked ? 0.52 : 0.8;
+      if (sprites[WEAPON_SPRITE[weapon.id]]) weaponIcon(weapon.id, cardCx, iconY, iconSize, { rotation });
+      text(weapon.name, cardCx, nameY, {
+        size: nameSize, color: selected ? "#ffe2a3" : "#d6d9e6", weight: selected ? 900 : 750, align: "center",
       });
-      if (weapon.locked) {
-        drawUiIcon("lock", x + shake + slotW - 18 * scale, y + 19 * scale, 26 * scale, { alpha: selected ? 0.94 : 0.7 });
-      }
+      const lockBox = weapon.locked ? {
+        x: x + slotW - 18 * scale, y: y + 4 * scale, w: 14 * scale, h: 14 * scale,
+      } : null;
+      if (lockBox) drawUiIcon("lock", lockBox.x + lockBox.w / 2, lockBox.y + lockBox.h / 2, lockBox.w, { alpha: 0.9 });
       ctx.restore();
       region(x, y, slotW, slotH, `weapon:${i}`);
       slotBoxes.push({
-        x, y, w: slotW, h: slotH, selected, locked: Boolean(weapon.locked), displayRotation,
+        x, y, w: slotW, h: slotH, selected, locked: Boolean(weapon.locked), displayRotation: rotation,
         content: {
-          weapon: { x: cx - weaponSize / 2, y: weaponY - weaponSize / 2, w: weaponSize, h: weaponSize },
-          name: { x: x + 18 * scale, y: weaponNameY - weaponNameSize, w: slotW - 36 * scale, h: weaponNameSize * 1.2 },
-          lock: weapon.locked ? { x: x + slotW - 34 * scale, y: y + 6 * scale, w: 29 * scale, h: 29 * scale } : null,
+          weapon: { x: cardCx - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize },
+          name: { x: x + 4 * scale, y: nameY - nameSize, w: slotW - 8 * scale, h: nameSize * 1.2 },
+          lock: lockBox,
         },
       });
     });
 
-    const sel = weapons[index];
-    const gridRows = Math.ceil(weapons.length / columns);
-    const infoW = Math.min((mobile ? 440 : 670) * scale, bounds.width - 30 * scale);
-    const infoX = cx0 - infoW / 2;
-    const infoY = mobile
-      ? slotY + gridRows * slotH + (gridRows - 1) * gapY + 16 * scale
-      : slotY + slotH + 34 * scale;
-    const infoTitleY = infoY + 17 * scale;
-    const infoTitle = sel.locked ? `${sel.name} · 잠김` : sel.name;
-    const infoTitleMaxW = mobile ? infoW - 8 * scale : Math.max(120 * scale, infoW - 360 * scale);
-    const infoTitleSize = fitTextSize(infoTitle, (mobile ? 18 : 22) * scale, infoTitleMaxW, { font: SERIF, weight: 900 });
-    text(infoTitle, infoX + 4 * scale, infoTitleY, {
-      size: infoTitleSize, color: sel.locked ? "#ffb0b3" : GOLD, font: SERIF, weight: 900, stroke: true,
-    });
-    const stats = [
-      ["power", "공격력", String(Math.round(sel.damage))],
-      ["range", "사거리", String(Math.round(sel.range || 0))],
-      ["speed", "공격 속도", attackSpeedLabel(sel)],
-    ];
+    const infoY = slotY + slotH + (landscape ? 17 : compact ? 15 : 25) * scale;
+    const infoX = left;
+    const infoW = contentW;
     const role = sel.role || WEAPON_ROLE[sel.id] || "";
-    text(role, infoX + 4 * scale, infoY + 37 * scale, { size: (mobile ? 11 : 12) * scale, color: "#fff2d0", weight: 750, stroke: true });
-    const statsTop = infoY + (mobile ? 61 : 5) * scale;
-    const statsStartX = mobile ? infoX : infoX + infoW - 330 * scale;
-    const statW = (mobile ? infoW : 330 * scale) / 3;
-    stats.forEach(([icon, label, value], i) => {
-      const x = statsStartX + statW * i + statW / 2;
-      drawUiIcon(icon, x - 22 * scale, statsTop + 10 * scale, 27 * scale, { alpha: 0.9 });
-      text(label, x - 4 * scale, statsTop + 4 * scale, { size: (mobile ? 8.5 : 10.5) * scale, color: MUTED, weight: 800, align: "left" });
-      text(value, x - 4 * scale, statsTop + 21 * scale, { size: (mobile ? 12 : 14.5) * scale, color: "#fff2d0", weight: 900, align: "left" });
-    });
-    const dividerY = infoY + (mobile ? 95 : 51) * scale;
-    drawUiFrame("stageOrnament", cx0 - infoW * 0.26, dividerY - 11 * scale, infoW * 0.52, 28 * scale, { alpha: 0.55 });
-    if (sel.locked) {
-      const unlockLabel = sel.unlock?.label || "도전을 계속하면 해금";
-      const unlockSize = fitTextSize(unlockLabel, (mobile ? 12.5 : 15) * scale, infoW - 8 * scale, { weight: 800 });
-      text(unlockLabel, infoX + 4 * scale, dividerY + 31 * scale, {
-        size: unlockSize, color: "#ffe2a3", weight: 800,
+    const rotation = ["chokento", "katana"].includes(sel.id) ? -Math.PI * 3 / 4 : 0;
+    let titleBox;
+    let statsBox;
+    let detailX;
+    let detailY;
+    let detailW;
+    let preview;
+    const stats = [["공격력", String(Math.round(sel.damage || 0))], ["사거리", String(Math.round(sel.range || 0))], ["공격 속도", attackSpeedLabel(sel)]];
+    const drawStats = (x, y, w, small = false) => {
+      stats.forEach(([label, value], i) => {
+        const xx = x + w * i / 3;
+        text(label, xx, y, { size: (small ? 11.5 : mobile ? 12 : 13) * scale, color: "#bcc9df", weight: 750 });
+        text(value, xx, y + (small ? 20 : 25) * scale, {
+          size: (small ? 16 : mobile ? 18 : 20) * scale, color: "#fff2c8", weight: 900,
+        });
       });
+      return { x, y: y - 15 * scale, w, h: (small ? 40 : 48) * scale };
+    };
+    const infoTitle = sel.locked ? `${sel.name} · 잠김` : sel.name;
+    if (mobile) {
+      const previewH = (compact ? 99 : clamp((cssH - 540) * 0.4 + 105, 150, 214)) * scale;
+      if (compact) {
+        const iconSize = 94 * scale;
+        preview = { x: left + 9 * scale, y: infoY + 2 * scale, w: 96 * scale, h: 96 * scale };
+        if (sprites[WEAPON_SPRITE[sel.id]]) weaponIcon(sel.id, preview.x + preview.w / 2, preview.y + preview.h / 2, iconSize, { rotation });
+        const titleX = left + 118 * scale;
+        const titleSize = 25 * scale;
+        text(infoTitle, titleX, infoY + 31 * scale, { size: titleSize, color: "#ffe2a3", font: SERIF, weight: 900 });
+        wrapText(role, titleX, infoY + 57 * scale, contentW - 118 * scale, 14 * scale, "#d8e1f0", 4 * scale, "left", 700);
+        titleBox = { x: titleX, y: infoY + 7 * scale, w: contentW - 118 * scale, h: 29 * scale };
+      } else {
+        const titleSize = 29 * scale;
+        text(infoTitle, cx, infoY + 27 * scale, { size: titleSize, color: "#ffe2a3", font: SERIF, weight: 900, align: "center" });
+        text(role, cx, infoY + 53 * scale, { size: 14 * scale, color: "#d8e1f0", weight: 750, align: "center" });
+        const iconSize = Math.min(146 * scale, previewH - 66 * scale);
+        const iconY = infoY + 68 * scale + (previewH - 68 * scale) / 2;
+        if (sprites[WEAPON_SPRITE[sel.id]]) weaponIcon(sel.id, cx, iconY, iconSize, { rotation });
+        preview = { x: cx - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize };
+        titleBox = { x: left, y: infoY, w: contentW, h: 37 * scale };
+      }
+      const statsY = infoY + previewH + (compact ? 13 : 21) * scale;
+      statsBox = drawStats(left + 12 * scale, statsY, contentW - 24 * scale, compact);
+      detailX = left + 12 * scale;
+      detailY = statsY + (compact ? 52 : 62) * scale;
+      detailW = contentW - 24 * scale;
+    } else {
+      const iconSize = (landscape ? 124 : 278) * scale;
+      const previewW = contentW * (landscape ? 0.22 : 0.36);
+      const iconX = left + previewW / 2;
+      const iconY = infoY + (landscape ? 78 : 162) * scale;
+      if (sprites[WEAPON_SPRITE[sel.id]]) weaponIcon(sel.id, iconX, iconY, iconSize, { rotation });
+      preview = { x: iconX - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize };
+      detailX = left + previewW + 20 * scale;
+      detailW = contentW - previewW - 38 * scale;
+      const titleSize = (landscape ? 25 : 33) * scale;
+      text(infoTitle, detailX, infoY + 25 * scale, { size: titleSize, color: "#ffe2a3", font: SERIF, weight: 900 });
+      text(role, detailX, infoY + (landscape ? 48 : 55) * scale, {
+        size: (landscape ? 13 : 16) * scale, color: "#d8e1f0", weight: 750,
+      });
+      titleBox = { x: detailX, y: infoY, w: detailW, h: 38 * scale };
+      if (landscape) {
+        statsBox = drawStats(detailX + detailW * 0.45, infoY + 8 * scale, detailW * 0.55, true);
+        detailY = infoY + 77 * scale;
+      } else {
+        statsBox = drawStats(detailX, infoY + 95 * scale, detailW);
+        detailY = infoY + 159 * scale;
+      }
+    }
+    const detailSize = (landscape ? 13 : mobile ? 14 : 16) * scale;
+    let lastDetailY = detailY;
+    if (sel.locked) {
+      text("해금 조건", detailX, detailY, { size: detailSize, color: "#e7bd73", weight: 900 });
+      lastDetailY = wrapText(sel.unlock?.label || "도전을 계속하면 해금", detailX, detailY + (landscape ? 22 : 26) * scale,
+        detailW, detailSize, "#fff2c8", 4 * scale, "left", 750);
       if (sel.unlockProgress) {
         const progress = sel.unlockProgress;
-        const value = Math.min(progress.value || 0, progress.target || sel.unlock?.threshold || 0);
-        const target = progress.target || sel.unlock?.threshold || 0;
-        text(`현재 ${value.toLocaleString()} / ${target.toLocaleString()}`, infoX + 4 * scale, dividerY + 56 * scale, { size: 12 * scale, color: "#bce6ff", weight: 800 });
-        bar(infoX + 4 * scale, dividerY + 67 * scale, infoW - 8 * scale, 4 * scale, target > 0 ? value / target : 0, "#548bc5", "#c3eaff");
-      }
-    } else if (sel.trait) {
-      const traitSize = fitTextSize(sel.trait, (mobile ? 12.5 : 15) * scale, infoW - 8 * scale, { weight: 700 });
-      text(sel.trait, infoX + 4 * scale, dividerY + 26 * scale, { size: traitSize, color: TEXT, weight: 700 });
-    }
-    if (!sel.locked && sel.skill) {
-      drawUiIcon("skill", infoX + 15 * scale, dividerY + 51 * scale, 28 * scale, { alpha: 0.9 });
-      const skillLabel = `기술 「${sel.skill}」`;
-      const skillLabelSize = fitTextSize(skillLabel, (mobile ? 12.5 : 15) * scale, infoW - 42 * scale, { weight: 900 });
-      const skillDesc = sel.skillDesc || "";
-      const skillDescSize = fitTextSize(skillDesc, (mobile ? 11.5 : 13.5) * scale, infoW - 42 * scale, { weight: 650 });
-      text(skillLabel, infoX + 36 * scale, dividerY + 49 * scale, { size: skillLabelSize, color: "#bfe8ff", weight: 900 });
-      text(skillDesc, infoX + 36 * scale, dividerY + 68 * scale, { size: skillDescSize, color: MUTED, weight: 650 });
-      if (sel.bossSkillDesc) {
-        text(sel.bossSkillDesc, infoX + 36 * scale, dividerY + 86 * scale, {
-          size: fitTextSize(sel.bossSkillDesc, 10.5 * scale, infoW - 42 * scale), color: "#d4b786", weight: 650,
+        const target = Math.max(0, Number(progress.target || sel.unlock?.threshold) || 0);
+        const value = Math.min(Math.max(0, Number(progress.value) || 0), target);
+        lastDetailY += (landscape ? 23 : 29) * scale;
+        text(`현재 ${value.toLocaleString("ko-KR")} / ${target.toLocaleString("ko-KR")}`, detailX, lastDetailY, {
+          size: (landscape ? 12 : 13) * scale, color: "#bde4f4", weight: 800,
         });
+        bar(detailX, lastDetailY + 12 * scale, detailW, 4 * scale, target ? value / target : 0, "#548bc5", "#c3eaff");
+        lastDetailY += 17 * scale;
+      }
+    } else {
+      if (sel.trait) lastDetailY = wrapText(sel.trait, detailX, detailY, detailW, detailSize, "#e2e7ef", 5 * scale, "left", 700);
+      if (sel.skill) {
+        lastDetailY += (landscape ? 23 : compact ? 22 : 29) * scale;
+        text(`기술 · ${sel.skill}`, detailX, lastDetailY, { size: detailSize, color: "#bfe8ff", weight: 900 });
+        lastDetailY = wrapText(sel.skillDesc || "", detailX, lastDetailY + (landscape ? 20 : 24) * scale,
+          detailW, detailSize, "#d7e0ef", 5 * scale, "left", 650);
+        if (sel.bossSkillDesc) lastDetailY = wrapText(sel.bossSkillDesc, detailX, lastDetailY + (landscape ? 20 : 24) * scale,
+          detailW, (landscape ? 12 : 13) * scale, "#d9c79f", 4 * scale, "left", 650);
       }
     }
-
-    const infoH = (mobile ? 187 : 144) * scale;
-    const confirmW = Math.min(bounds.width - 54 * scale, (mobile ? 268 : 340) * scale);
-    const confirmH = (mobile ? 64 : 68) * scale;
-    const confirmY = Math.min(infoY + infoH + 28 * scale, H - 22 * scale - confirmH);
-    const confirmBox = primaryActionButton(
-      cx0,
-      confirmY + confirmH / 2,
-      confirmW,
-      confirmH,
-      assetsFailed ? "다시 시도" : preparationSummary ? "이 무기로 준비" : "선    택",
-      "weapon:confirm",
-      {
-        selected: assetsFailed || (!sel.locked && !assetsLoading),
-        scale,
-        fontSize: mobile ? 18 : 21,
-      },
-    );
-
+    const confirmH = (landscape ? 45 : 52) * scale;
+    const confirmY = H - (landscape ? 29 : compact ? 37 : 61) * scale;
+    const confirmW = Math.min(contentW, (landscape ? 328 : mobile ? 296 : 364) * scale);
+    const label = assetsFailed ? "다시 시도" : assetsLoading ? "장비 준비 중" : sel.locked ? "아직 잠긴 무기" : "무기 선택";
+    const confirmBox = outlinedActionButton(cx, confirmY, confirmW, confirmH, label, "weapon:confirm", {
+      selected: !sel.locked && !assetsLoading, primary: true, disabled: !assetsFailed && (sel.locked || assetsLoading),
+      scale, fontSize: landscape ? 16 : 18,
+    });
     metrics.weaponSelect = {
-      assetsLoading,
-      assetsFailed,
-      role,
-      unlockProgress: sel.unlockProgress || null,
-      title: { x: cx0 - titleOrnamentW / 2, y: titleY * scale - 28 * scale, w: titleOrnamentW, h: 62 * scale },
-      slots: slotBoxes,
-      info: {
-        x: infoX, y: infoY, w: infoW, h: infoH,
-        content: {
-          title: { x: infoX + 4 * scale, y: infoTitleY - infoTitleSize, w: infoTitleMaxW, h: infoTitleSize * 1.2 },
-          stats: { x: statsStartX, y: statsTop - 8 * scale, w: mobile ? infoW : 330 * scale, h: 38 * scale },
-          detail: { x: infoX + 4 * scale, y: dividerY + 12 * scale, w: infoW - 8 * scale, h: sel.locked ? 30 * scale : sel.bossSkillDesc ? 82 * scale : 64 * scale },
-        },
+      assetsLoading, assetsFailed, role, unlockProgress: sel.unlockProgress || null, columns: weapons.length,
+      title: { x: cx - 120 * scale, y: titleY - 30 * scale, w: 240 * scale, h: 55 * scale },
+      slots: slotBoxes, preview,
+      info: { x: infoX, y: infoY, w: infoW, h: Math.max(preview.y + preview.h - infoY, lastDetailY + 10 * scale - infoY),
+        content: { title: titleBox, stats: statsBox, detail: { x: detailX, y: detailY - detailSize, w: detailW, h: lastDetailY - detailY + detailSize + 10 * scale } },
       },
-      confirm: confirmBox,
-      preparation: preparationSummary ? { ...preparationSummary, access: preparationAccess } : null,
-      landscape: false,
+      confirm: confirmBox, preparation: prep ? { ...prep, access: preparationAccess } : null, landscape, compact,
     };
+  }
+
+  function drawWeaponSelect(data) {
+    if (isShortLandscape()) {
+      drawWeaponSelectLandscape(data);
+      return;
+    }
+    drawWeaponSelectionComposition(data);
   }
 
   // === forge ===
@@ -2033,10 +1962,8 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     const centerColumn = grid ? Math.floor((grid.x.length - 1) / 2) : -1;
     if (!image || !record?.rect || !grid || centerColumn < 0) return null;
 
-    const sourceX = grid.x[centerColumn];
-    const sourceY = grid.y[0];
-    const sourceW = grid.x[centerColumn + 1] - sourceX;
-    const sourceH = grid.y[1] - sourceY;
+    const [sourceX, sourceY, sourceW, sourceH] = grid.gemRect || [grid.x[centerColumn], grid.y[0],
+      grid.x[centerColumn + 1] - grid.x[centerColumn], grid.y[1] - grid.y[0]];
     const canvas = document.createElement("canvas");
     canvas.width = sourceW;
     canvas.height = sourceH;
@@ -2280,12 +2207,12 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     drawForgeRotatingRays(x, y, w, h, rank, t, selected, scale);
   }
 
-  function drawForgeRankGem(rankKey, x, y, w, h, alpha, selected) {
+  function drawForgeRankGem(rankKey, x, y, w, h, alpha, selected, preferredScale = null) {
     const record = uiAtlas?.frame?.frames?.forgeFrame;
     const grid = uiAtlas?.frame?.sliceGrid?.forgeFrame;
     const style = RANK_STYLE[rankKey] || RANK_STYLE.common;
     if (!record?.rect || !grid) return { x: x + w / 2 - 1, y, w: 2, h: 2 };
-    const frameScale = Math.min(w / record.rect[2], h / record.rect[3]);
+    const frameScale = frameScaleFor(record, grid, w, h, preferredScale);
     const columns = sliceAxis(record.rect[2], grid.x, grid.xStretch, w, frameScale);
     const rows = sliceAxis(record.rect[3], grid.y, grid.yStretch, h, frameScale);
     const centerColumn = Math.floor(columns.length / 2);
@@ -2300,157 +2227,28 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     };
 
     const drawX = x + column.target;
-    const drawY = y + row.target;
+    const drawY = y + row.target + (grid.gemRect?.[1] || 0) * frameScale;
+    const drawW = sprite.canvas.width * frameScale;
+    const drawH = sprite.canvas.height * frameScale;
     ctx.save();
     ctx.globalAlpha *= alpha;
     ctx.shadowColor = style.neonColor || "rgba(0,0,0,0)";
     ctx.shadowBlur = style.neonColor && selected ? 10 * frameScale : 0;
-    ctx.drawImage(sprite.canvas, drawX, drawY, column.targetLength, row.targetLength);
+    ctx.drawImage(sprite.canvas, drawX, drawY, drawW, drawH);
     ctx.shadowBlur = 0;
-    ctx.drawImage(sprite.canvas, drawX, drawY, column.targetLength, row.targetLength);
+    ctx.drawImage(sprite.canvas, drawX, drawY, drawW, drawH);
     ctx.restore();
     return {
-      x: drawX + sprite.bbox.x / sprite.canvas.width * column.targetLength,
-      y: drawY + sprite.bbox.y / sprite.canvas.height * row.targetLength,
-      w: sprite.bbox.w / sprite.canvas.width * column.targetLength,
-      h: sprite.bbox.h / sprite.canvas.height * row.targetLength,
+      x: drawX + sprite.bbox.x * frameScale,
+      y: drawY + sprite.bbox.y * frameScale,
+      w: sprite.bbox.w * frameScale,
+      h: sprite.bbox.h * frameScale,
     };
   }
 
-  function drawForgeLandscape({
-    cards,
-    selected,
-    freeRerolls,
-    purchasedRerolls,
-    stackOf,
-    deniedT,
-    enterT,
-    t,
-    stage,
-    rewardNote,
-    previewOf,
-    canReroll,
-    reducedMotion,
-    deniedReason = "",
-  }) {
-    const bounds = shortLandscapeBounds(760);
-    const cx = bounds.cx;
-    const scale = baseUiScale();
-    const totalRerolls = freeRerolls + purchasedRerolls;
-    const rerollDisabled = canReroll === null ? totalRerolls <= 0 : !canReroll;
-    const denied = deniedT > 0;
-    const deniedLabel = String(deniedReason || "리롤권 없음").trim() || "리롤권 없음";
-    const stageText = `스테이지 ${stage + 1} 클리어`;
-    text(stageText, cx, 18 * scale, { size: 10.5 * scale, color: "#b9c9e1", align: "center", spacing: 1.8 * scale, weight: 800, stroke: true });
-    text("단조", cx, 46 * scale, { size: 27 * scale, color: "#fff4d8", font: SERIF, weight: 900, align: "center", spacing: 6 * scale, stroke: true });
-    const rewardText = rewardNote || "하나를 골라 무기에 새긴다";
-    text(rewardText, cx, 64 * scale, { size: fitTextSize(rewardText, 10.5 * scale, 290 * scale), color: rewardNote ? GOLD : MUTED, align: "center", weight: rewardNote ? 800 : 650 });
-
-    const quit = outlinedActionButton(bounds.left + 59 * scale, 38 * scale, 118 * scale, 46 * scale, "모험 종료", "pause:quit", {
-      danger: true, scale, fontSize: 11.5,
-    });
-
-    const rerollW = 166 * scale;
-    const rerollH = 48 * scale;
-    const rerollX = bounds.right - rerollW + (denied ? Math.sin(t * 55) * 3 * scale : 0);
-    const rerollY = 14 * scale;
-    panel(rerollX, rerollY, rerollW, rerollH, { alpha: rerollDisabled ? 0.36 : 0.7, border: rerollDisabled ? "rgba(150,140,190,0.2)" : "rgba(143,227,255,0.48)", radius: 8 * scale });
-    if (!denied) drawUiIcon("reroll", rerollX + 24 * scale, rerollY + rerollH / 2, 30 * scale, { alpha: rerollDisabled ? 0.42 : 0.96 });
-    const rerollLabelX = denied ? rerollX + rerollW / 2 : rerollX + 47 * scale;
-    const rerollLabelMaxW = denied ? rerollW - 16 * scale : rerollW - 55 * scale;
-    text(denied ? deniedLabel : "리롤권 사용", rerollLabelX, rerollY + 17 * scale, {
-      size: fitTextSize(denied ? deniedLabel : "리롤권 사용", 10.5 * scale, rerollLabelMaxW),
-      color: denied ? "#ffaaaa" : rerollDisabled ? "#8f8998" : "#fff2d2", weight: 900,
-      align: denied ? "center" : "left",
-    });
-    const rerollText = `무료 ${freeRerolls} · 구매 ${purchasedRerolls}`;
-    text(rerollText, rerollX + 47 * scale, rerollY + 36 * scale, {
-      size: fitTextSize(rerollText, 11.5 * scale, rerollW - 55 * scale), color: rerollDisabled ? "#6f7284" : "#8fdcff", weight: 900,
-    });
-    region(rerollX, rerollY, rerollW, rerollH, "forge:reroll");
-
-    const gap = 12 * scale;
-    const cardW = (bounds.width - gap * 2) / 3;
-    const cardH = 205 * scale;
-    const startY = 76 * scale;
-    const cardBoxes = [];
-    cards.forEach((card, i) => {
-      const enter = clamp((enterT - i * 0.07) / 0.32, 0, 1);
-      const rank = RANK_STYLE[card.rank] || RANK_STYLE.common;
-      const selectedCard = i === selected;
-      const x = bounds.left + i * (cardW + gap);
-      const y = startY + (1 - easeOutBack(enter)) * 20 * scale;
-      ctx.save();
-      ctx.globalAlpha = enter;
-      drawForgeRarityGlow(x, y, cardW, cardH, rank, reducedMotion ? 0 : t + i * 0.4, selectedCard, scale);
-      drawUiFrame("forgeFrame", x, y, cardW, cardH, { alpha: selectedCard ? 1 : 0.68 });
-      const gemBox = drawForgeRankGem(card.rank, x, y, cardW, cardH, selectedCard ? 1 : 0.84, selectedCard);
-      const iconSize = Math.max(46 * scale, Math.min(72 * scale, cardW - 118 * scale));
-      const iconX = x + 54 * scale;
-      const iconY = y + 77 * scale;
-      forgeCardIcon(card.id, iconX, iconY, iconSize / 80);
-      const textX = x + 103 * scale;
-      const textW = Math.max(70 * scale, cardW - 118 * scale);
-      const nameSize = fitTextSize(card.name, 17 * scale, textW, { font: SERIF, weight: 900 });
-      text(card.name, textX, y + 48 * scale, { size: nameSize, color: rank.color, font: SERIF, weight: 900, stroke: true });
-      const scopeLabel = card.weapon ? `${WEAPON_LABEL[card.weapon] || card.weapon} 전용` : "모든 무기";
-      text(scopeLabel, textX, y + 70 * scale, { size: 9.5 * scale, color: "#b8c8df", weight: 800 });
-      const descY = y + 95 * scale;
-      const descLastY = wrapText(card.desc, textX, descY, textW, 10.5 * scale, TEXT, 3 * scale, "left", 650);
-      const preview = previewOf?.(card.id);
-      const previewText = typeof preview === "string" ? preview : preview ? `${preview.label}  ${preview.before} → ${preview.after}` : "";
-      let previewBox = null;
-      if (previewText) {
-        const previewSize = fitTextSize(previewText, 10.5 * scale, cardW - 30 * scale);
-        const previewY = y + cardH - 23 * scale;
-        text(previewText, x + cardW / 2, previewY, { size: previewSize, color: "#bcebb6", weight: 850, align: "center", stroke: true });
-        previewBox = { x: x + 15 * scale, y: previewY - previewSize, w: cardW - 30 * scale, h: previewSize * 1.2 };
-      }
-      const stack = stackOf?.(card.id) || 0;
-      if (!card.unique && stack > 0) text(`×${stack}`, x + cardW - 17 * scale, y + 36 * scale, { size: 10 * scale, color: "#c3d1e4", weight: 800, align: "right", stroke: true });
-      ctx.restore();
-      region(x, y, cardW, cardH, `forge:${i}`);
-      cardBoxes.push({
-        x, y, w: cardW, h: cardH, selected: selectedCard, rank: card.rank, preview: previewText,
-        rarityVisual: {
-          gemColor: rank.gemColor, neonColor: rank.neonColor, glowEligible: Boolean(rank.neonColor),
-          glowVisible: selectedCard && Boolean(rank.neonColor), glowMode: selectedCard && rank.neonColor ? "point-source" : "none",
-          glowOrigin: rank.neonColor ? { x: 0.5, y: 0.5 } : null,
-          glowRays: selectedCard && rank.neonColor ? FORGE_RAY_COUNT : 0,
-          glowPrimaryRays: selectedCard && rank.neonColor ? FORGE_PRIMARY_RAY_COUNT : 0,
-          glowPrimaryRayWidth: selectedCard && rank.neonColor ? FORGE_PRIMARY_RAY_WIDTH : 0,
-          glowRim: Boolean(selectedCard && rank.neonColor), glowRotates: Boolean(selectedCard && rank.neonColor && !reducedMotion),
-          glowRotation: selectedCard && rank.neonColor ? (t * FORGE_RAY_ROTATION_SPEED) % (Math.PI * 2) : null,
-          glowRotationSpeed: selectedCard && rank.neonColor ? FORGE_RAY_ROTATION_SPEED : 0,
-          glowAttachmentInset: selectedCard && rank.neonColor ? { x: 2.5 * scale, y: 2.5 * scale } : null,
-          labelVisible: false,
-        },
-        content: {
-          icon: { x: iconX - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize },
-          title: { x: textX, y: y + 48 * scale - nameSize, w: textW, h: nameSize * 1.2 },
-          gem: gemBox,
-          scope: { x: textX, y: y + 57 * scale, w: textW, h: 18 * scale },
-          description: { x: textX, y: descY - 10.5 * scale, w: textW, h: descLastY - descY + 13 * scale },
-          preview: previewBox,
-        },
-      });
-    });
-    const confirm = outlinedActionButton(cx, 337 * scale, 390 * scale, 48 * scale, "선    택", "forge:confirm", { selected: true, scale, fontSize: 17 });
-    const headerW = 280 * scale;
-    metrics.forge = {
-      rewardText,
-      header: { x: cx - headerW / 2, y: 3 * scale, w: headerW, h: 64 * scale },
-      headerContent: {},
-      cards: cardBoxes,
-      confirm,
-      quit,
-      reroll: {
-        x: rerollX, y: rerollY, w: rerollW, h: rerollH, count: totalRerolls,
-        free: freeRerolls, purchased: purchasedRerolls, disabled: rerollDisabled,
-        currency: "ticket", deniedReason: denied ? deniedLabel : null,
-      },
-      landscape: true,
-    };
+  function drawForgeLandscape(options) {
+    // Share card content and action semantics with the taller compositions.
+    return drawForge({ ...options, landscape: true });
   }
 
   function drawForge({
@@ -2470,252 +2268,257 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     canReroll = null,
     reducedMotion = false,
     deniedReason = "",
+    saveError = "",
+    landscape = false,
   }) {
     const freeCount = Math.max(0, Math.round(Number(freeRerolls === null ? rerolls : freeRerolls) || 0));
     const purchasedCount = Math.max(0, Math.round(Number(purchasedRerolls === null ? (carriedRerolls === null ? 0 : carriedRerolls) : purchasedRerolls) || 0));
-    if (isShortLandscape()) {
-      drawForgeLandscape({
-        cards, selected, freeRerolls: freeCount, purchasedRerolls: purchasedCount, stackOf, deniedT, enterT, t,
-        stage, rewardNote, previewOf, canReroll, reducedMotion, deniedReason,
+    if (isShortLandscape() && !landscape) {
+      return drawForgeLandscape({
+        cards, selected, freeRerolls: freeCount, purchasedRerolls: purchasedCount,
+        stackOf, deniedT, enterT, t, stage, rewardNote, previewOf, canReroll,
+        reducedMotion, deniedReason, saveError,
       });
-      return;
     }
-    const bounds = safeBounds();
+    const bounds = landscape ? shortLandscapeBounds(760) : safeBounds();
     const cx = bounds.cx;
-    const mobile = isMobileLayout();
-    // Fit the complete stack and its action together, including a bottom margin.
-    // Clamping only the action position lets it slide over the final card.
-    const mobileHeight = 144 + cards.length * 158 + Math.max(0, cards.length - 1) * 14 + 28 + 64 + 32;
-    const scale = mobile ? Math.min(sceneUiScale(), H / mobileHeight) : sceneUiScale();
-    const headerW = Math.min(bounds.width * (mobile ? 0.48 : 0.54), 278 * scale);
-    const headerStageY = 24 * scale;
-    const headerStageSize = (mobile ? 11 : 13) * scale;
-    const headerTitleY = (mobile ? 62 : 68) * scale;
-    const headerTitleSize = (mobile ? 30 : 34) * scale;
-    const headerOrnament = snapCssRect(cx - headerW / 2, (mobile ? 78 : 86) * scale, headerW, 22 * scale);
-    drawUiFrame("stageOrnament", headerOrnament.x, headerOrnament.y, headerOrnament.w, headerOrnament.h, { alpha: 0.92 });
-    const stageText = `스테이지 ${stage + 1} 클리어`;
-    text(stageText, cx, headerStageY, { size: headerStageSize, color: "#b9c9e1", align: "center", spacing: 2.4 * scale, weight: 800, stroke: true });
-    text("단조", cx, headerTitleY, { size: headerTitleSize, color: "#fff4d8", font: SERIF, weight: 900, align: "center", spacing: 8 * scale, stroke: true });
+    const scale = baseUiScale();
+    const mobile = !landscape && isMobileLayout();
+    const cssHeight = H / scale;
+    const lowStack = mobile && cssHeight < 700 && bounds.width / scale >= 540;
+    const compactStack = mobile && cssHeight < 740 && bounds.width / scale < 540;
+    const frameScale = (compactStack || lowStack ? 0.28 : mobile || landscape ? 0.38 : 0.62) * scale;
+    const contentTopOffset = (mobile || landscape ? 12 : 16) * scale;
+    const previewBottom = Math.max(17 * scale, 54 * frameScale);
+    const gap = (compactStack ? 8 : mobile ? 10 : 16) * scale;
+    const cardW = mobile
+      ? Math.min((lowStack ? 650 : 560) * scale, bounds.width - 28 * scale)
+      : (bounds.width - (landscape ? 0 : 40 * scale) - gap * 2) / 3;
+    const stageText = "스테이지 " + (stage + 1) + " 클리어";
     const rewardText = rewardNote || "하나를 골라 무기에 새긴다";
-    const rewardSize = fitTextSize(rewardText, (mobile ? 11.5 : 13.5) * scale, Math.min(bounds.width - 48 * scale, 330 * scale), { weight: rewardNote ? 800 : 650 });
-    const headerRewardY = (mobile ? 120 : 132) * scale;
-    text(rewardText, cx, headerRewardY, {
-      size: rewardSize, color: rewardNote ? GOLD : MUTED, align: "center", weight: rewardNote ? 800 : 650,
-    });
-
-    const quitW = (mobile ? 68 : 98) * scale;
-    const quitH = 44 * scale;
-    const quit = outlinedActionButton(bounds.left + 8 * scale + quitW / 2, 14 * scale + quitH / 2, quitW, quitH, mobile ? "종료" : "모험 종료", "pause:quit", {
-      danger: true, scale, fontSize: mobile ? 10.5 : 11.5,
-    });
-
-    const denied = deniedT > 0;
-    const deniedLabel = String(deniedReason || "리롤권 없음").trim() || "리롤권 없음";
     const totalRerolls = freeCount + purchasedCount;
     const rerollDisabled = canReroll === null ? totalRerolls <= 0 : !canReroll;
-    const rerollW = (mobile ? 84 : 112) * scale;
-    const rerollH = 52 * scale;
-    const rerollX = bounds.right - rerollW - 8 * scale + (denied ? Math.sin(t * 55) * 3 * scale : 0);
-    const rerollY = 66 * scale;
-    const rerollIconX = rerollX + 16 * scale;
-    const rerollTextX = rerollX + 34 * scale;
-    const rerollAlpha = rerollDisabled ? 0.42 : 0.96;
-    if (!denied) drawUiIcon("reroll", rerollIconX, rerollY + rerollH / 2, 27 * scale, { alpha: rerollAlpha });
-    const rerollLabelX = denied ? rerollX + rerollW / 2 : rerollTextX;
-    const rerollLabelMaxW = denied ? rerollW - 12 * scale : rerollW - 35 * scale;
-    text(denied ? deniedLabel : "리롤권 사용", rerollLabelX, rerollY + 14 * scale, {
-      size: fitTextSize(denied ? deniedLabel : "리롤권 사용", (mobile ? 9.5 : 11.5) * scale, rerollLabelMaxW),
-      color: denied ? "#ff8a8f" : (rerollDisabled ? "#8f8998" : "#fff2d2"),
-      weight: 900,
-      baseline: "middle",
-      align: denied ? "center" : "left",
+    const failure = String(saveError || deniedReason || "").trim();
+
+    // The small heading and the ticket control occupy separate rows on phones.
+    const headerW = Math.min(292 * scale, bounds.width - 28 * scale);
+    const stageSize = (compactStack ? 10 : 12) * scale;
+    const titleSize = (compactStack ? 18 : landscape ? 26 : 28) * scale;
+    const rewardSize = (compactStack ? 12 : 14) * scale;
+    const stageY = (compactStack ? 12 : 16) * scale;
+    const titleY = (compactStack ? 37 : 51) * scale;
+    const ornamentY = (compactStack ? 46 : 64) * scale;
+    const rewardY = (compactStack ? 63 : 88) * scale;
+    text(stageText, cx, stageY, { size: stageSize, color: "#c0ccdf", align: "center", weight: 750 });
+    text("단조", cx, titleY, { size: titleSize, color: TEXT, font: SERIF, weight: 900, align: "center", spacing: 4 * scale });
+    ctx.save();
+    ctx.strokeStyle = "rgba(232,179,75,0.56)";
+    ctx.lineWidth = scale;
+    ctx.beginPath();
+    ctx.moveTo(cx - 54 * scale, ornamentY);
+    ctx.lineTo(cx + 54 * scale, ornamentY);
+    ctx.stroke();
+    ctx.restore();
+    text(rewardText, cx, rewardY, { size: rewardSize, color: rewardNote ? GOLD : "#c0ccdf", align: "center", weight: 650 });
+    const headerBox = { x: cx - headerW / 2, y: 0, w: headerW, h: (compactStack ? 70 : 94) * scale };
+    const measuredBox = (label, y, size, options = {}) => {
+      const w = measureTextWidth(label, { size, ...options });
+      return { x: cx - w / 2, y: y - size, w, h: size * 1.2 };
+    };
+    const quit = outlinedActionButton(bounds.left + 36 * scale, 29 * scale, 72 * scale, 44 * scale, "종료", "pause:quit", {
+      danger: true, scale, fontSize: 14,
     });
-    const rerollText = `무료 ${freeCount} · 구매 ${purchasedCount}`;
-    text(rerollText, rerollTextX, rerollY + 31 * scale, {
-      size: fitTextSize(rerollText, (mobile ? 12 : 14) * scale, rerollW - 35 * scale),
-      color: denied ? "#ff8a8f" : (rerollDisabled ? "#6f7284" : "#8fdcff"),
-      weight: 900,
-      baseline: "middle",
-      stroke: !rerollDisabled,
+
+    const previews = cards.map(card => {
+      const value = previewOf?.(card.id);
+      if (typeof value === "string") return value === card.desc ? "고유 효과 추가" : value;
+      return value ? value.label + "  " + value.before + " → " + value.after : "고유 효과 추가";
+    });
+    const bodyXInset = (lowStack ? 106 : 16) * scale;
+    const bodyWidth = cardW - bodyXInset - 16 * scale;
+    const bodySize = (mobile || landscape ? 14 : 15) * scale;
+    const lineGap = 4 * scale;
+    const countLines = (label, width, size, weight = 650) => {
+      let lines = 1;
+      let line = "";
+      for (const word of String(label).split(" ")) {
+        const candidate = line ? line + " " + word : word;
+        if (line && measureTextWidth(candidate, { size, weight }) > width) {
+          lines += 1;
+          line = word;
+        } else line = candidate;
+      }
+      return lines;
+    };
+    const descriptionYInset = (compactStack ? 58 : lowStack ? 76 : landscape ? 78 : mobile ? 83 : 211) * scale + contentTopOffset;
+    const previewSize = 14 * scale;
+    const contentHeights = cards.map((card, index) => {
+      const descLines = countLines(card.desc, bodyWidth, bodySize);
+      const previewLines = countLines(previews[index], bodyWidth, previewSize, 850);
+      return descriptionYInset + (descLines - 1) * (bodySize + lineGap)
+        + 26 * scale + (previewLines - 1) * (previewSize + lineGap) + previewBottom - 2 * scale;
+    });
+    const compactCardHeight = clamp((cssHeight - 170) / 3, 110, 150);
+    const cardH = Math.max((compactStack ? compactCardHeight : lowStack ? 120 : landscape ? 192 : mobile ? 162 : 338) * scale, ...contentHeights);
+    const startY = (compactStack ? 76 : landscape ? 112 : lowStack ? 104 : mobile ? 152 : 170) * scale;
+    const rowWidth = mobile ? cardW : cardW * 3 + gap * 2;
+    const startX = cx - rowWidth / 2;
+    const cardBoxes = [];
+
+    cards.forEach((card, i) => {
+      const rank = RANK_STYLE[card.rank] || RANK_STYLE.common;
+      const selectedCard = i === selected;
+      const enter = reducedMotion ? 1 : clamp((enterT - i * 0.05) / 0.24, 0, 1);
+      const x = startX + (mobile ? 0 : i * (cardW + gap));
+      const y = startY + (mobile ? i * (cardH + gap) : 0);
+      const inset = (landscape ? 14 : 16) * scale;
+      const iconSize = (compactStack ? 24 : landscape ? 36 : lowStack ? 62 : mobile ? 46 : 82) * scale;
+      const iconX = mobile || landscape ? x + inset + iconSize / 2 : x + cardW / 2;
+      const iconY = y + (mobile || landscape ? 15 * scale + iconSize / 2 : 68 * scale) + contentTopOffset;
+      const titleX = mobile || landscape ? x + (compactStack ? 52 : lowStack ? 106 : landscape ? 66 : 78) * scale : x + cardW / 2;
+      const titleY = y + (compactStack ? 31 : mobile || landscape ? 31 : 146) * scale + contentTopOffset;
+      const titleW = mobile || landscape ? x + cardW - (compactStack ? 100 : 34) * scale - titleX : cardW - 40 * scale;
+      const nameSize = fitTextSize(card.name, (compactStack || landscape ? 18 : mobile ? 20 : 23) * scale, titleW, { font: SERIF, weight: 900, minSize: 18 * scale });
+      const titleWidth = measureTextWidth(card.name, { size: nameSize, font: SERIF, weight: 900 });
+      const align = mobile || landscape ? "left" : "center";
+      const stack = stackOf?.(card.id) || 0;
+      const scopeLabel = (card.weapon ? (WEAPON_LABEL[card.weapon] || card.weapon) + " 전용" : "모든 무기")
+        + (!card.unique && stack > 0 ? " · " + stack + "회 적용" : "");
+      const scopeSize = (compactStack ? 11 : mobile || landscape ? 12 : 14) * scale;
+      const scopeWidth = compactStack ? measureTextWidth(scopeLabel, { size: scopeSize, weight: 650 }) : titleW;
+      const scopeX = compactStack ? x + cardW - 34 * scale - scopeWidth : titleX;
+      const scopeY = y + (compactStack ? 30 : mobile || landscape ? 55 : 178) * scale + contentTopOffset;
+      const descX = x + bodyXInset;
+      const descY = y + descriptionYInset;
+      const previewText = previews[i];
+      const previewLines = countLines(previewText, bodyWidth, previewSize, 850);
+      const previewY = y + cardH - previewBottom - (previewLines - 1) * (previewSize + lineGap);
+
+      ctx.save();
+      ctx.globalAlpha = enter;
+      const atlasFrame = drawUiFrame("forgeFrame", x, y, cardW, cardH, {
+        alpha: selectedCard ? 1 : 0.72, frameScale,
+      });
+      if (!atlasFrame) panel(x, y, cardW, cardH, { alpha: 0.8 });
+      const gemBox = drawForgeRankGem(card.rank, x, y, cardW, cardH, selectedCard ? 1 : 0.72, false, frameScale);
+      forgeCardIcon(card.id, iconX, iconY, iconSize / 80);
+      text(card.name, titleX, titleY, { size: nameSize, color: selectedCard ? "#fff3cc" : TEXT, font: SERIF, weight: 900, align });
+      text(scopeLabel, scopeX, scopeY, { size: scopeSize, color: "#bfcee2", weight: 650, align });
+      const descriptionLastY = wrapText(card.desc, descX, descY, bodyWidth, bodySize, TEXT, lineGap, "left", 650);
+      const previewLastY = wrapText(previewText, descX, previewY, bodyWidth, previewSize, "#bcebb6", lineGap, "left", 850);
+      ctx.restore();
+      region(x, y, cardW, cardH, "forge:" + i);
+      cardBoxes.push({
+        x, y, w: cardW, h: cardH, selected: selectedCard, rank: card.rank, preview: previewText,
+        frame: { atlas: atlasFrame, name: "forgeFrame", scale: frameScale, edgeMode: "repeat" },
+        rarityVisual: {
+          gemColor: rank.gemColor, neonColor: rank.neonColor,
+          glowEligible: Boolean(rank.neonColor), glowVisible: false, glowMode: "none",
+          glowOrigin: null, glowRays: 0, glowPrimaryRays: 0, glowPrimaryRayWidth: 0,
+          glowRim: false, glowRotates: false, glowRotation: null, glowRotationSpeed: 0,
+          glowAttachmentInset: null, labelVisible: false,
+        },
+        content: {
+          icon: { x: iconX - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize },
+          title: { x: align === "left" ? titleX : titleX - titleWidth / 2, y: titleY - nameSize, w: titleWidth, h: nameSize * 1.2 },
+          gem: gemBox,
+          scope: { x: align === "left" ? scopeX : scopeX - scopeWidth / 2, y: scopeY - scopeSize, w: scopeWidth, h: scopeSize * 1.2 },
+          description: { x: descX, y: descY - bodySize, w: bodyWidth, h: descriptionLastY - descY + bodySize * 1.2 },
+          preview: { x: descX, y: previewY - previewSize, w: bodyWidth, h: previewLastY - previewY + previewSize * 1.2 },
+        },
+      });
+    });
+
+    const cardBottom = startY + (mobile ? cards.length * cardH + Math.max(0, cards.length - 1) * gap : cardH);
+    const rerollW = compactStack ? (cardW - 8 * scale) / 2 : (landscape ? 206 : lowStack ? 260 : Math.min(330, cardW / scale)) * scale;
+    const rerollX = landscape ? bounds.right - rerollW : compactStack || lowStack ? startX : cx - rerollW / 2;
+    const rerollY = landscape ? 61 * scale : compactStack ? cardBottom + 32 * scale : lowStack ? cardBottom + 36 * scale : 101 * scale;
+    const rerollH = 44 * scale;
+    const buttonW = compactStack ? rerollW : (landscape ? 92 : 110) * scale;
+    outlinedActionButton(rerollX + buttonW / 2, rerollY + rerollH / 2, buttonW, rerollH, "새로고침", "forge:reroll", {
+      disabled: rerollDisabled, scale, fontSize: 14, primary: false,
+    });
+    const countLabel = "무료 " + freeCount + " · 구매 " + purchasedCount;
+    const countX = compactStack ? cx : rerollX + buttonW + 9 * scale;
+    text(compactStack && failure ? failure : countLabel, countX, compactStack ? cardBottom + 21 * scale : rerollY + 26 * scale, {
+      size: 14 * scale, color: compactStack && failure ? "#ffb2a8" : rerollDisabled ? "#9cadc5" : "#bfe7f6", weight: 750,
+      align: compactStack ? "center" : "left",
     });
     region(rerollX, rerollY, rerollW, rerollH, "forge:reroll");
 
-    const gap = (mobile ? 14 : 20) * scale;
-    const desktopCardTopInset = mobile ? 0 : 38;
-    const cardW = mobile
-      ? Math.min(508 * scale, bounds.width - 28 * scale)
-      : Math.floor((bounds.width - 44 * scale - gap * 2) / 3);
-    const cardH = (mobile ? 158 : 394) * scale;
-    const rowWidth = cardW * (mobile ? 1 : 3) + gap * (mobile ? 0 : 2);
-    const startX = cx - rowWidth / 2;
-    const startY = (mobile ? 144 : 176) * scale;
-    const cardBoxes = [];
-    cards.forEach((card, i) => {
-      const enter = clamp((enterT - i * 0.07) / 0.32, 0, 1);
-      const rank = RANK_STYLE[card.rank] || RANK_STYLE.common;
-      const selectedCard = i === selected;
-      const x = startX + (mobile ? 0 : i * (cardW + gap));
-      const baseY = startY + (mobile ? i * (cardH + gap) : 0);
-      const y = baseY + (1 - easeOutBack(enter)) * 34 * scale;
-      ctx.save();
-      ctx.globalAlpha = enter;
-      drawForgeRarityGlow(x, y, cardW, cardH, rank, reducedMotion ? 0 : t + i * 0.4, selectedCard, scale);
-      drawUiFrame("forgeFrame", x, y, cardW, cardH, {
-        alpha: selectedCard ? 1 : 0.68,
-      });
-      const gemBox = drawForgeRankGem(card.rank, x, y, cardW, cardH, selectedCard ? 1 : 0.84, selectedCard);
-
-      const iconX = mobile ? x + 59 * scale : x + cardW / 2;
-      const iconY = mobile ? y + 73 * scale : y + (109 + desktopCardTopInset) * scale;
-      const textX = mobile ? x + 119 * scale : x + cardW / 2;
-      const iconSize = mobile
-        ? 86.4 * scale
-        : Math.min(113.6 * scale, cardW - 188 * scale);
-      const iconScale = iconSize / 80;
-      forgeCardIcon(card.id, iconX, iconY, iconScale);
-      const nameMaxW = mobile
-        ? Math.max(80 * scale, Math.min(cardW - 151 * scale, cardW / 2 - 26 * scale - (textX - x)))
-        : cardW - 56 * scale;
-      const nameSize = fitTextSize(card.name, (mobile ? 18.5 : 24) * scale, nameMaxW, { font: SERIF, weight: 900 });
-      const nameWidth = measureTextWidth(card.name, { size: nameSize, font: SERIF, weight: 900 });
-      const nameY = mobile ? y + 58 * scale : y + (202 + desktopCardTopInset) * scale;
-      text(card.name, textX, nameY, {
-        size: nameSize,
-        color: rank.color,
-        font: SERIF,
-        weight: 900,
-        align: mobile ? "left" : "center",
-        stroke: true,
-      });
-      const scopeLabel = card.weapon ? `${WEAPON_LABEL[card.weapon] || card.weapon} 전용` : "모든 무기";
-      const scopeY = mobile ? y + 77 * scale : y + (228 + desktopCardTopInset) * scale;
-      if (card.weapon) weaponIcon(card.weapon, mobile ? textX + 7 * scale : textX - 42 * scale, scopeY, 16 * scale, rank.color);
-      text(scopeLabel, mobile ? textX + (card.weapon ? 19 : 0) * scale : textX + (card.weapon ? 9 : 0) * scale, scopeY, {
-        size: (mobile ? 10 : 12.5) * scale, color: "#b8c8df", weight: 800, align: mobile ? "left" : "center", baseline: "middle",
-      });
-      const dividerY = mobile ? y + 87 * scale : y + (246 + desktopCardTopInset) * scale;
-      const dividerX = mobile ? textX : x + 26 * scale;
-      const dividerW = mobile ? x + cardW - 22 * scale - textX : cardW - 52 * scale;
-      drawUiFrame("stageOrnament", dividerX, dividerY - 7 * scale, Math.max(52 * scale, dividerW), 20 * scale, { alpha: 0.34 });
-      const descriptionY = mobile ? y + 105 * scale : y + (270 + desktopCardTopInset) * scale;
-      const descriptionSize = (mobile ? 12 : 14.5) * scale;
-      const descriptionLastY = wrapText(
-        card.desc,
-        mobile ? textX : x + cardW / 2,
-        descriptionY,
-        mobile ? cardW - 141 * scale : cardW - 52 * scale,
-        descriptionSize,
-        TEXT,
-        4 * scale,
-        mobile ? "left" : "center",
-        650,
-      );
-
-      const preview = previewOf?.(card.id);
-      const previewText = typeof preview === "string" ? preview : preview ? `${preview.label}  ${preview.before} → ${preview.after}` : "";
-      let previewBox = null;
-      if (previewText) {
-        const previewW = mobile ? cardW - 141 * scale : cardW - 52 * scale;
-        const previewSize = fitTextSize(previewText, (mobile ? 11 : 12.5) * scale, previewW);
-        const previewY = y + cardH - (mobile ? 19 : 42) * scale;
-        text(previewText, mobile ? textX : x + cardW / 2, previewY, {
-          size: previewSize, color: "#bcebb6", weight: 850, align: mobile ? "left" : "center", stroke: true,
-        });
-        previewBox = { x: mobile ? textX : x + 26 * scale, y: previewY - previewSize, w: previewW, h: previewSize * 1.2 };
+    let confirm;
+    let failureBox = null;
+    if (compactStack) {
+      confirm = primaryActionButton(startX + cardW - rerollW / 2, rerollY + 22 * scale, rerollW, 44 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: 16 });
+      if (failure) failureBox = { x: startX, y: cardBottom + 7 * scale, w: cardW, h: 17 * scale };
+    } else if (landscape) {
+      confirm = primaryActionButton(cx, Math.min(cssHeight - 28, 345) * scale, 304 * scale, 48 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: 18 });
+      if (failure) {
+        const errorW = Math.max(150 * scale, (bounds.width - confirm.w) / 2 - 16 * scale);
+        const y = cardBottom + 23 * scale;
+        const lastY = wrapText(failure, bounds.left, y, errorW, 14 * scale, "#ffb2a8", 4 * scale, "left", 750);
+        failureBox = { x: bounds.left, y: y - 14 * scale, w: errorW, h: lastY - y + 17 * scale };
       }
-
-      const stack = stackOf(card.id);
-      if (!card.unique && stack > 0) {
-        text(`×${stack}`, mobile ? x + 59 * scale : x + cardW - 22 * scale, mobile ? y + 130 * scale : y + 58 * scale, { size: (mobile ? 10 : 12) * scale, color: "#c3d1e4", weight: 800, align: mobile ? "center" : "right", stroke: true });
+    } else if (lowStack) {
+      confirm = primaryActionButton(startX + cardW - 132 * scale, rerollY + 22 * scale, 264 * scale, 48 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: 18 });
+      if (failure) {
+        text(failure, cx, cardBottom + 22 * scale, { size: 14 * scale, color: "#ffb2a8", align: "center", weight: 750 });
+        failureBox = { x: startX, y: cardBottom + 8 * scale, w: cardW, h: 17 * scale };
       }
-      ctx.restore();
-      region(x, y, cardW, cardH, `forge:${i}`);
-      cardBoxes.push({
-        x, y, w: cardW, h: cardH, selected: selectedCard, rank: card.rank, preview: previewText,
-        rarityVisual: {
-          gemColor: rank.gemColor,
-          neonColor: rank.neonColor,
-          glowEligible: Boolean(rank.neonColor),
-          glowVisible: selectedCard && Boolean(rank.neonColor),
-          glowMode: selectedCard && rank.neonColor ? "point-source" : "none",
-          glowOrigin: rank.neonColor ? { x: 0.5, y: 0.5 } : null,
-          glowRays: selectedCard && rank.neonColor ? FORGE_RAY_COUNT : 0,
-          glowPrimaryRays: selectedCard && rank.neonColor ? FORGE_PRIMARY_RAY_COUNT : 0,
-          glowPrimaryRayWidth: selectedCard && rank.neonColor ? FORGE_PRIMARY_RAY_WIDTH : 0,
-          glowRim: Boolean(selectedCard && rank.neonColor),
-          glowRotates: Boolean(selectedCard && rank.neonColor && !reducedMotion),
-          glowRotation: selectedCard && rank.neonColor ? (t * FORGE_RAY_ROTATION_SPEED) % (Math.PI * 2) : null,
-          glowRotationSpeed: selectedCard && rank.neonColor ? FORGE_RAY_ROTATION_SPEED : 0,
-          glowAttachmentInset: selectedCard && rank.neonColor
-            ? { x: 2.5 * scale, y: (mobile ? 2.5 : 8.5) * scale }
-            : null,
-          labelVisible: false,
-        },
-        content: mobile ? {
-          icon: { x: iconX - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize },
-          title: { x: textX, y: nameY - nameSize, w: nameWidth, h: nameSize * 1.2 },
-          gem: gemBox,
-          scope: { x: textX, y: y + 68 * scale, w: cardW - 141 * scale, h: 20 * scale },
-          description: { x: textX, y: descriptionY - descriptionSize, w: cardW - 141 * scale, h: descriptionLastY - descriptionY + descriptionSize * 1.2 },
-          preview: previewBox,
-        } : {
-          icon: { x: iconX - iconSize / 2, y: iconY - iconSize / 2, w: iconSize, h: iconSize },
-          title: { x: textX - nameWidth / 2, y: nameY - nameSize, w: nameWidth, h: nameSize * 1.2 },
-          gem: gemBox,
-          scope: { x: x + 28 * scale, y: y + (217 + desktopCardTopInset) * scale, w: cardW - 56 * scale, h: 22 * scale },
-          description: { x: x + 26 * scale, y: descriptionY - descriptionSize, w: cardW - 52 * scale, h: descriptionLastY - descriptionY + descriptionSize * 1.2 },
-          preview: previewBox,
-        },
-      });
-    });
-
-    const cardBottom = mobile
-      ? startY + cards.length * cardH + Math.max(0, cards.length - 1) * gap
-      : startY + cardH + 6 * scale;
-    const footerY = mobile ? cardBottom + 28 * scale : Math.min(cardBottom + 42 * scale, H - 116 * scale);
-    const confirmW = Math.min(bounds.width - 54 * scale, (mobile ? 268 : 340) * scale);
-    const confirmH = (mobile ? 64 : 68) * scale;
-    const confirmX = cx - confirmW / 2;
-    primaryActionButton(cx, footerY + confirmH / 2, confirmW, confirmH, "선    택", "forge:confirm", {
-      selected: true,
-      scale,
-      fontSize: mobile ? 18 : 21,
-    });
-
-    const headerStageW = measureTextWidth(stageText, { size: headerStageSize, weight: 800, spacing: 2.4 * scale });
-    const headerTitleW = measureTextWidth("단조", { size: headerTitleSize, font: SERIF, weight: 900, spacing: 8 * scale });
-    const headerRewardW = measureTextWidth(rewardText, { size: rewardSize, weight: rewardNote ? 800 : 650 });
+    } else {
+      const failureWidth = Math.min(bounds.width - 32 * scale, 540 * scale);
+      const failureLines = failure ? countLines(failure, failureWidth, 14 * scale, 750) : 1;
+      const footerY = cardBottom + (58 + Math.max(0, failureLines - 1) * 18) * scale;
+      confirm = primaryActionButton(cx, footerY, Math.min(bounds.width - 48 * scale, 330 * scale), 56 * scale, "이 강화 적용", "forge:confirm", { primary: true, scale, fontSize: mobile ? 18 : 20 });
+      if (failure) {
+        const lastY = wrapText(failure, cx, cardBottom + 22 * scale, failureWidth, 14 * scale, "#ffb2a8", 4 * scale, "center", 750);
+        failureBox = { x: bounds.left + 16 * scale, y: cardBottom + 8 * scale, w: bounds.width - 32 * scale, h: lastY - cardBottom - 22 * scale + 17 * scale };
+      }
+    }
     metrics.forge = {
       rewardText,
-      header: snapCssRect(cx - headerW / 2, 10 * scale, headerW, (mobile ? 116 : 130) * scale),
+      header: headerBox,
       headerContent: {
-        stage: { x: cx - headerStageW / 2, y: headerStageY - headerStageSize, w: headerStageW, h: headerStageSize * 1.2 },
-        title: { x: cx - headerTitleW / 2, y: headerTitleY - headerTitleSize, w: headerTitleW, h: headerTitleSize * 1.2 },
-        ornament: headerOrnament,
-        reward: { x: cx - headerRewardW / 2, y: headerRewardY - rewardSize, w: headerRewardW, h: rewardSize * 1.2 },
+        stage: measuredBox(stageText, stageY, stageSize, { weight: 750 }),
+        title: measuredBox("단조", titleY, titleSize, { font: SERIF, weight: 900, spacing: 4 * scale }),
+        ornament: { x: cx - 54 * scale, y: ornamentY - 0.5 * scale, w: 108 * scale, h: scale },
+        reward: measuredBox(rewardText, rewardY, rewardSize, { weight: 650 }),
       },
-      cards: cardBoxes,
-      confirm: { x: confirmX, y: footerY, w: confirmW, h: confirmH },
-      quit,
+      cards: cardBoxes, confirm, quit, failure: failureBox,
       reroll: {
         x: rerollX, y: rerollY, w: rerollW, h: rerollH, count: totalRerolls,
         free: freeCount, purchased: purchasedCount, currency: "ticket", disabled: rerollDisabled,
-        deniedReason: denied ? deniedLabel : null,
+        deniedReason: failure || null, label: "새로고침", countLabel,
       },
-      landscape: false,
+      landscape,
     };
   }
 
   function drawQuitConfirm({ shards = 0, enterT = 0, focusedIndex = 0, saveError = "" } = {}) {
     const landscape = isShortLandscape();
     const bounds = landscape ? shortLandscapeBounds(760) : safeBounds();
-    const scale = landscape ? baseUiScale() : Math.min(screenUiScale(), H / 640);
+    const scale = baseUiScale();
     const cx = bounds.cx;
     const count = Math.max(0, Math.round(Number(shards) || 0));
     const focus = Math.max(0, Math.min(1, Math.round(Number(focusedIndex) || 0)));
-    const width = Math.min(bounds.width - 28 * scale, (landscape ? 560 : 470) * scale);
-    const height = (landscape ? 250 : 286) * scale;
+    const width = Math.min(bounds.width - (landscape ? 0 : 24) * scale, 400 * scale);
+    const messageWidth = width - 48 * scale;
+    const message = `스테이지·강화가 초기화되고 파편 ${count.toLocaleString("ko-KR")}을 받습니다.`;
+    const countLines = (value) => {
+      let line = "";
+      let count = 1;
+      for (const word of value.split(" ")) {
+        const next = line ? `${line} ${word}` : word;
+        if (line && measureTextWidth(next, { size: 14 * scale, weight: 650 }) > messageWidth) {
+          count += 1;
+          line = word;
+        } else line = next;
+      }
+      return count;
+    };
+    const messageLines = countLines(message);
+    const errorLines = saveError ? countLines(saveError) : 0;
+    const height = (198 + messageLines * 22 + (errorLines ? 14 + errorLines * 22 : 0)) * scale;
     const top = (H - height) / 2;
     ctx.save();
     ctx.globalAlpha = clamp(0.78 + Math.max(0, Number(enterT) || 0) * 0.25, 0.78, 0.94);
@@ -2725,26 +2528,20 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     // Keep pause/system controls behind the confirmation from receiving taps.
     // The two explicit actions below are registered afterwards and win hitAt().
     region(0, 0, W, H, "quit:block");
-    panel(cx - width / 2, top, width, height, { alpha: 0.97, border: "rgba(255,122,122,0.55)", radius: 12 * scale });
-    text("모험을 마칠까요?", cx, top + 47 * scale, {
-      size: (landscape ? 24 : 27) * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center", spacing: 2 * scale,
+    panel(cx - width / 2, top, width, height, { alpha: 0.97, border: "rgba(232,179,75,0.28)", radius: 10 * scale });
+    text("모험을 종료할까요?", cx, top + 47 * scale, {
+      size: 24 * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center",
     });
-    ornament(cx, top + 66 * scale, 105 * scale);
-    crystalIcon(cx - 94 * scale, top + 106 * scale, 8 * scale, "#8fe3ff");
-    text(`이번 모험 파편 ${count.toLocaleString("ko-KR")}개를 받고 돌아갑니다`, cx, top + 111 * scale, {
-      size: fitTextSize(`이번 모험 파편 ${count.toLocaleString("ko-KR")}개를 받고 돌아갑니다`, 14 * scale, width - 48 * scale), color: "#bfeeff", weight: 900, align: "center",
-    });
-    text(saveError || "종료하면 현재 스테이지와 단조 강화는 끝납니다", cx, top + 145 * scale, {
-      size: fitTextSize(saveError || "종료하면 현재 스테이지와 단조 강화는 끝납니다", 11 * scale, width - 46 * scale), color: saveError ? "#ffaaaa" : MUTED, weight: 700, align: "center",
-    });
+    wrapText(message, cx, top + 92 * scale, messageWidth, 14 * scale, TEXT, 8 * scale, "center", 650);
+    if (saveError) wrapText(saveError, cx, top + (106 + messageLines * 22) * scale, messageWidth, 14 * scale, "#ffb2a8", 8 * scale, "center", 650);
     const gap = 12 * scale;
-    const actionW = (width - 48 * scale - gap) / 2;
-    const actionY = top + height - 50 * scale;
-    const continueBox = outlinedActionButton(cx - (actionW + gap) / 2, actionY, actionW, 48 * scale, "계속하기", "quit:continue", {
-      selected: focus === 0, scale, fontSize: 13.5,
+    const actionW = (width - 40 * scale - gap) / 2;
+    const actionY = top + height - 47 * scale;
+    const continueBox = outlinedActionButton(cx - (actionW + gap) / 2, actionY, actionW, 48 * scale, "이전으로", "quit:continue", {
+      selected: focus === 0, scale, fontSize: 16,
     });
-    const confirmBox = outlinedActionButton(cx + (actionW + gap) / 2, actionY, actionW, 48 * scale, "종료하고 정산", "quit:confirm", {
-      selected: focus === 1, danger: true, scale, fontSize: 13.5,
+    const confirmBox = outlinedActionButton(cx + (actionW + gap) / 2, actionY, actionW, 48 * scale, saveError ? "다시 시도" : "모험 종료", "quit:confirm", {
+      selected: focus === 1, danger: true, scale, fontSize: 16,
     });
     metrics.quitConfirm = {
       blocker: { x: 0, y: 0, w: W, h: H, id: "quit:block" },
@@ -2759,561 +2556,441 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
     };
   }
 
-  function drawResultsLandscape({
-    score,
-    bestCombo,
-    floors,
-    stage,
-    weapon,
-    weaponId,
-    attacks,
-    skills,
-    unlocked,
-    registered,
-    enterT,
-    saveError,
-    profileSaved,
-    personalBest,
-    personalBestStage,
-    deathCause,
-    endReason,
-    earnedShards,
-    bankBefore,
-    bankAfter,
-    returnedTickets,
-    settlementError,
-  }) {
-    const bounds = shortLandscapeBounds(760);
-    const cx = bounds.cx;
-    const scale = baseUiScale();
-    const quit = ["quit", "manual", "abandoned", "exit"].includes(endReason);
-    const verdict = quit ? "모험 종료" : "사망";
-    const flavor = quit ? "획득한 파편을 챙겨 돌아왔다"
-      : deathCause === "debris" ? "보스의 잔해에 맞아 쓰러졌다" : "몬스터에게 짓눌렸다";
-    const hasSettlement = earnedShards !== null || bankAfter !== null || bankBefore !== null || returnedTickets !== null;
-    const settlementFailed = Boolean(settlementError) || (hasSettlement && profileSaved === false);
-    text("이번 모험", cx, 29 * scale, { size: 25 * scale, color: TEXT, font: SERIF, weight: 900, align: "center", spacing: 4 * scale });
-    ornament(cx, 44 * scale, 95 * scale);
-    text(`${verdict} · ${flavor}`, cx, 62 * scale, { size: 10.5 * scale, color: quit ? "#bfeeff" : "#ffacac", align: "center", weight: 750 });
+  function resultsSceneShade() {
+    const shade = ctx.createLinearGradient(0, 0, 0, H);
+    shade.addColorStop(0, "rgba(7,13,34,0.55)");
+    shade.addColorStop(0.45, "rgba(7,13,34,0.68)");
+    shade.addColorStop(1, "rgba(7,13,34,0.88)");
+    ctx.fillStyle = shade;
+    ctx.fillRect(0, 0, W, H);
+  }
 
-    const sideW = 238 * scale;
-    const sideH = 184 * scale;
-    const sideY = 78 * scale;
-    const leftX = bounds.left;
-    const rightX = bounds.right - sideW;
-    panel(leftX, sideY, sideW, sideH, { alpha: 0.58, border: GOLD_DIM, radius: 9 * scale });
-    text(personalBest ? "개인 최고 기록" : "이번 점수", leftX + 18 * scale, sideY + 26 * scale, { size: 10.5 * scale, color: personalBest ? "#ffe2a3" : MUTED, weight: 800 });
-    const shownScore = Math.round(score * easeOutCubic(clamp((enterT - 0.36) / 0.7, 0, 1)));
-    text(shownScore.toLocaleString("ko-KR"), leftX + sideW - 18 * scale, sideY + 58 * scale, { size: 30 * scale, color: GOLD, weight: 900, align: "right" });
-    const stats = [
-      ["무기", weapon || "장검"], ["도달", `스테이지 ${stage}`], ["최대 콤보", String(bestCombo)], ["붕괴", `${floors}줄`],
-    ];
-    stats.forEach(([label, value], i) => {
-      const y = sideY + (84 + i * 27) * scale;
-      text(label, leftX + 18 * scale, y, { size: 10 * scale, color: MUTED, weight: 800 });
-      text(value, leftX + sideW - 18 * scale, y, { size: 11.5 * scale, color: TEXT, weight: 850, align: "right" });
+  function resultsHurtHero(weaponId, cx, groundY, height, enterT) {
+    const sprite = sprites[`motion_${weaponId}_hurt_v1`];
+    if (!sprite) return null;
+    // Frame 7 keeps every weapon inside this crop. Its feet end at cell y=423.
+    // Anchor the existing hurt pose to a visible floor, rather than its padded cell.
+    const width = height * 320 / 352;
+    const x = cx - width / 2;
+    const y = groundY - height * 343 / 352;
+    ctx.save();
+    ctx.globalAlpha = clamp(enterT / 0.45, 0, 1);
+    const floor = ctx.createLinearGradient(cx - width * 0.7, groundY, cx + width * 0.7, groundY);
+    floor.addColorStop(0, "rgba(119,184,216,0)");
+    floor.addColorStop(0.5, "rgba(119,184,216,0.30)");
+    floor.addColorStop(1, "rgba(119,184,216,0)");
+    ctx.fillStyle = floor;
+    ctx.fillRect(cx - width * 0.7, groundY, width * 1.4, 2 * baseUiScale());
+    ctx.fillStyle = "rgba(2,8,20,0.65)";
+    ctx.beginPath();
+    ctx.ellipse(cx, groundY, width * 0.28, height * 0.027, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(sprite, 3 * 480 + 80, 528 + 80, 320, 352, x, y, width, height);
+    ctx.restore();
+    return { x, y, w: width, h: height, groundY, weaponId, pose: "hurt", frame: 7 };
+  }
+
+  function resultsWeaponReward(newWeapon, box, scale, disabled, focused = false) {
+    if (!newWeapon?.id) return null;
+    const { x, y, w, h } = box;
+    const actionId = `results:newWeapon:${newWeapon.id}`;
+    const hover = pointer.x >= x && pointer.x <= x + w && pointer.y >= y && pointer.y <= y + h;
+    ctx.save();
+    ctx.fillStyle = focused || hover ? "rgba(35,49,72,0.78)" : "rgba(13,25,46,0.58)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = focused || hover ? GOLD : "rgba(232,179,75,0.4)";
+    ctx.lineWidth = scale;
+    ctx.beginPath();
+    ctx.moveTo(x + 8 * scale, y + h - scale);
+    ctx.lineTo(x + w - 8 * scale, y + h - scale);
+    ctx.stroke();
+    ctx.restore();
+    const iconX = x + 18 * scale;
+    const iconY = y + h / 2;
+    if (sprites[WEAPON_SPRITE[newWeapon.id]]) {
+      weaponIcon(newWeapon.id, iconX, iconY, 31 * scale, {
+        rotation: ["chokento", "katana"].includes(newWeapon.id) ? -Math.PI * 3 / 4 : 0,
+      });
+    }
+    const name = newWeapon.name || WEAPON_LABEL[newWeapon.id] || newWeapon.id;
+    const label = `${name} 해금`;
+    text(label, x + 36 * scale, iconY + scale, {
+      size: 14 * scale, color: disabled ? "#8d99ae" : "#f6e6bf", weight: 800, baseline: "middle",
     });
+    text("›", x + w - 13 * scale, iconY, {
+      size: 21 * scale, color: disabled ? "#8d99ae" : GOLD, align: "center", baseline: "middle",
+    });
+    region(x, y, w, h, actionId);
+    const action = { ...box, id: actionId, label, disabled, focused, selected: focused, primary: false };
+    return { ...box, id: newWeapon.id, name, action };
+  }
 
-    let heroBox = null;
-    const hero = sprites[`motion_${weaponId}_hurt_v1`];
-    if (hero) {
-      const frame = 7;
-      const drawH = 156 * scale;
-      const drawW = drawH * 480 / 528;
-      const heroX = cx - drawW / 2;
-      const heroY = 105 * scale;
-      heroBox = { x: heroX, y: heroY, w: drawW, h: drawH };
+  function resultsSettlement(box, data, scale, compact = false) {
+    const { x, y, w, h } = box;
+    const amount = value => Math.max(0, Number(value) || 0).toLocaleString("ko-KR");
+    const returned = Math.max(0, Number(data.returnedTickets) || 0);
+    const gained = `파편 +${amount(data.earnedShards)}`;
+    const gainedSize = fitTextSize(gained, 25 * scale, w - 42 * scale, { weight: 850, minSize: 18 * scale });
+    const gainedWidth = measureTextWidth(gained, { size: gainedSize, weight: 850 });
+    const gainedX = x + w / 2 - gainedWidth / 2 + 10 * scale;
+    crystalIcon(gainedX - 19 * scale, y + 18 * scale, 7 * scale, "#8fe3ff");
+    text(gained, gainedX, y + 25 * scale, {
+      size: gainedSize, color: data.failed ? "#b4baca" : "#fff2c8", weight: 850,
+    });
+    const bank = data.failed ? "정산 미완료" : `보유 ${amount(data.bankAfter)}`;
+    text(bank, x + w / 2, y + 49 * scale, {
+      size: 14 * scale, color: data.failed ? "#ffb2a6" : "#bcd3db", weight: 650, align: "center",
+    });
+    if (returned > 0 && !data.failed) text(`새로고침 ${returned}회 반환`, x + w / 2, y + 72 * scale, {
+      size: 14 * scale, color: "#d9cda9", weight: 650, align: "center",
+    });
+    return {
+      ...box, earnedShards: Math.max(0, Number(data.earnedShards) || 0),
+      bankBefore: Math.max(0, Number(data.bankBefore) || 0), bankAfter: Math.max(0, Number(data.bankAfter) || 0),
+      returnedTickets: returned,
+    };
+  }
+
+  function drawResultsLandscape(data) {
+    drawResultsComposition(data, true);
+  }
+
+  function drawResultsComposition({
+    score = 0, bestCombo = 0, floors = 0, stage = 1, weapon, weaponId = "chokento", attacks = 0, skills = 0,
+    unlocked = [], newlyUnlockedIds = [], newWeapon = null, registered, enterT = 0, saveError = "",
+    profileSaved = null, personalBest = false, personalBestStage = null, deathCause = "contact",
+    endReason = "death", earnedShards = null, bankBefore = null, bankAfter = null,
+    returnedTickets = null, settlementError = "", settlementPending = false, unlockedWeapons = [], section = "main", scrollOffset = 0, focusedIndex = 0,
+  }, landscape = false) {
+    const bounds = landscape ? shortLandscapeBounds(780) : safeBounds();
+    const cx = bounds.cx;
+    // Type and touch targets use CSS pixels. Height pressure scrolls content;
+    // it never scales the complete results screen below readable sizes.
+    const scale = baseUiScale();
+    const cssHeight = H / scale;
+    const spacious = bounds.width / scale >= 820;
+    const wide = landscape;
+    const contentW = Math.min(bounds.width - (landscape ? 12 : 24) * scale, (wide ? 740 : spacious ? 600 : 500) * scale);
+    const left = cx - contentW / 2;
+    const quit = ["quit", "manual", "abandoned", "exit"].includes(endReason);
+    const hasSettlement = earnedShards !== null || bankAfter !== null || bankBefore !== null || returnedTickets !== null;
+    const settlementFailed = Boolean(settlementPending || settlementError) || (hasSettlement && profileSaved === false);
+    const rewardWeapons = [...new Map([
+      ...unlockedWeapons,
+      ...newlyUnlockedIds.map(id => ({ id, name: WEAPON_LABEL[id] })),
+      ...(newWeapon?.id ? [newWeapon] : []),
+    ].filter(item => item?.id).map(item => [item.id, item])).values()];
+    const primaryId = settlementFailed ? "results:retrySave" : "results:primary";
+    const focusOrder = section === "details" ? ["results:back"] : settlementFailed
+      ? [primaryId, "results:details"]
+      : ["results:retry", "results:newChallenge", primaryId, "results:details", ...rewardWeapons.map(item => `results:newWeapon:${item.id}`)];
+    const focusId = focusOrder[clamp(focusedIndex, 0, focusOrder.length - 1)];
+    const amount = value => Math.max(0, Number(value) || 0).toLocaleString("ko-KR");
+    resultsSceneShade();
+    if (section === "details") {
+      const width = Math.min(contentW, 560 * scale);
+      const detailLeft = cx - width / 2;
+      const titleY = (landscape ? 34 : 56) * scale;
+      text("상세 기록", cx, titleY, { size: 26 * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center" });
+      const rowHeight = 44 * scale;
+      const stats = [
+        ["무기", weapon || WEAPON_LABEL[weaponId] || "장검"],
+        ["점수", amount(score)], ["도달", `스테이지 ${stage}`], ["최대 콤보", `${bestCombo}`],
+        ["붕괴", `${floors}줄`], ["공격 / 기술", `${attacks} / ${skills}회`],
+        ["종료", quit ? "모험 종료" : deathCause === "debris" ? "잔해 피격" : "몬스터 피격"],
+        ["획득 파편", `+${amount(earnedShards)}`],
+        ["보유 파편", settlementFailed ? "정산 미완료" : `${amount(bankBefore)} → ${amount(bankAfter)}`],
+      ];
+      if (Number(returnedTickets) > 0) stats.push(["새로고침 반환", `${returnedTickets}회`]);
+      const listTop = titleY + 28 * scale;
+      const listHeight = Math.min(stats.length * rowHeight, H - listTop - 84 * scale);
+      const contentHeight = stats.length * rowHeight;
+      const maxOffset = Math.max(0, contentHeight - listHeight);
+      const offset = clamp(Number(scrollOffset) || 0, 0, maxOffset);
       ctx.save();
-      ctx.imageSmoothingEnabled = true;
-      ctx.globalAlpha = clamp(enterT / 0.45, 0, 1);
-      ctx.drawImage(hero, (frame % 4) * 480, Math.floor(frame / 4) * 528, 480, 528, heroX, heroY, drawW, drawH);
+      ctx.beginPath();
+      ctx.rect(detailLeft, listTop, width, listHeight);
+      ctx.clip();
+      stats.forEach(([label, value], index) => {
+        const rowY = listTop + index * rowHeight - offset;
+        ctx.fillStyle = index % 2 === 0 ? "rgba(11,23,45,0.45)" : "rgba(11,23,45,0.24)";
+        ctx.fillRect(detailLeft, rowY, width, rowHeight);
+        text(label, detailLeft + 16 * scale, rowY + rowHeight / 2, { size: 14 * scale, color: MUTED, baseline: "middle", weight: 650 });
+        text(value, detailLeft + width - 16 * scale, rowY + rowHeight / 2, { size: 15 * scale, color: TEXT, align: "right", baseline: "middle", weight: 800 });
+      });
       ctx.restore();
+      if (maxOffset > 0) {
+        const thumbH = Math.max(24 * scale, listHeight * listHeight / contentHeight);
+        ctx.fillStyle = "rgba(232,179,75,0.65)";
+        ctx.fillRect(detailLeft + width - 3 * scale, listTop + (listHeight - thumbH) * offset / maxOffset, 3 * scale, thumbH);
+      }
+      const back = outlinedActionButton(cx, listTop + listHeight + 44 * scale, Math.min(width, 260 * scale), 48 * scale,
+        "이전으로", "results:back", { selected: true, scale, fontSize: 16 });
+      metrics.results = {
+        section, hero: null, record: null, stats: { x: detailLeft, y: listTop, w: width, h: listHeight },
+        statRows: stats.map(([label, value], index) => ({ label, value, x: detailLeft, y: listTop + index * rowHeight - offset, w: width, h: rowHeight })),
+        settlement: null, achievement: null, note: null, newWeapon: null, newWeapons: [],
+        actions: { primary: null, retry: null, newChallenge: null, details: null, back, newWeapon: null },
+        scroll: { x: detailLeft, y: listTop, w: width, h: listHeight, offset, maxOffset, contentHeight, rowHeight },
+        focusOrder, focusedIndex: 0, saveError: settlementError || saveError || null,
+        settlementFailed, deathCause, endReason: quit ? "quit" : "death", landscape,
+      };
+      return;
     }
 
-    panel(rightX, sideY, sideW, sideH, { alpha: 0.62, border: hasSettlement ? "rgba(143,227,255,0.5)" : GOLD_DIM, radius: 9 * scale });
-    text(hasSettlement ? "파편 정산" : "전투 기록", rightX + 18 * scale, sideY + 29 * scale, { size: 15 * scale, color: hasSettlement ? "#bfeeff" : GOLD, font: SERIF, weight: 900 });
-    const settlementRows = hasSettlement ? [
-      ["이번 획득", `+${Math.max(0, Number(earnedShards) || 0).toLocaleString("ko-KR")}`],
-      ["정산 전", Math.max(0, Number(bankBefore) || 0).toLocaleString("ko-KR")],
-      ["정산 후", Math.max(0, Number(bankAfter) || 0).toLocaleString("ko-KR")],
-      ["반환 리롤권", `+${Math.max(0, Number(returnedTickets) || 0)}`],
-    ] : [
-      ["공격", `${attacks || 0}회`], ["기술", `${skills || 0}회`], ["최대 콤보", String(bestCombo)], ["붕괴", `${floors}줄`],
-    ];
-    settlementRows.forEach(([label, value], i) => {
-      const y = sideY + (62 + i * 31) * scale;
-      text(label, rightX + 18 * scale, y, { size: 10.5 * scale, color: MUTED, weight: 800 });
-      text(value, rightX + sideW - 18 * scale, y, { size: 12.5 * scale, color: hasSettlement && i === 2 ? "#bcebb6" : TEXT, weight: 900, align: "right" });
+    const recordW = wide ? contentW * 0.57 : contentW;
+    const shortPortrait = !wide && cssHeight <= 650;
+    const compactReturn = shortPortrait && Number(returnedTickets) > 0 && !settlementFailed;
+    const recordH = (compactReturn ? 138 : landscape || shortPortrait ? 160 : spacious ? 210 : 180) * scale;
+    const sideW = wide ? contentW - recordW - 28 * scale : contentW;
+    const sideX = wide ? left + recordW + 28 * scale : left;
+    const returned = Math.max(0, Number(returnedTickets) || 0);
+    const settlementHeight = (returned > 0 && !settlementFailed ? 82 : 60) * scale;
+    const rewardColumns = sideW >= 280 * scale ? 2 : 1;
+    const rewardRowHeight = 48 * scale;
+    const rewardHeight = rewardWeapons.length ? Math.ceil(rewardWeapons.length / rewardColumns) * rewardRowHeight + 12 * scale : 0;
+    const errorMessages = [...new Set([settlementError || (settlementFailed ? "정산을 저장하지 못했습니다." : ""), saveError].filter(Boolean))];
+    const note = errorMessages.join(" ");
+    const noteWidth = wide ? sideW : contentW;
+    ctx.save();
+    ctx.font = `650 ${14 * scale}px ${SANS}`;
+    const noteLines = note ? Math.max(1, Math.ceil(ctx.measureText(note).width / (noteWidth - 12 * scale))) : 0;
+    ctx.restore();
+    const noteHeight = noteLines ? (noteLines * 20 + 12) * scale : 0;
+    const summaryHeight = (hasSettlement ? settlementHeight : 0) + rewardHeight + noteHeight;
+    const contentHeight = wide ? Math.max(recordH, summaryHeight) : recordH + 12 * scale + summaryHeight;
+    const headerHeight = (landscape ? 44 : 62) * scale;
+    const footerHeight = 120 * scale;
+    const idealHeight = headerHeight + contentHeight + footerHeight;
+    const footerInset = (landscape ? 8 : clamp((cssHeight - 700) * 0.9 + 24, 24, 132)) * scale;
+    const actionTop = H - footerInset - 106 * scale;
+    const top = Math.max((landscape ? 8 : 16) * scale, Math.min((H - idealHeight) * 0.42, actionTop - contentHeight - headerHeight - 18 * scale));
+    const titleY = top + 24 * scale;
+    text("모험 결과", cx, titleY, {
+      size: 26 * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center", spacing: 1.5 * scale,
     });
+    const contentTop = top + headerHeight;
+    const contentAreaHeight = Math.min(contentHeight, Math.max(80 * scale, actionTop - contentTop - 18 * scale));
+    const maxOffset = contentHeight - contentAreaHeight > 0.5 * scale ? contentHeight - contentAreaHeight : 0;
+    const offset = clamp(Number(scrollOffset) || 0, 0, maxOffset);
+    const recordTop = contentTop - offset;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left - 2 * scale, contentTop, contentW + 4 * scale, contentAreaHeight);
+    ctx.clip();
+    const contentHitStart = hits.length;
+    const heroHeight = (compactReturn ? 126 : landscape ? 142 : shortPortrait ? 146 : spacious ? 192 : 166) * scale;
+    const heroCx = left + recordW * (wide ? 0.78 : 0.76);
+    const heroGround = recordTop + recordH - 12 * scale;
+    const heroBox = resultsHurtHero(weaponId, heroCx, heroGround, heroHeight, enterT);
+    const scoreWidth = recordW * 0.55;
+    const scoreX = left + scoreWidth / 2;
+    const scoreY = recordTop + (compactReturn ? 72 : landscape ? 79 : shortPortrait ? 85 : spacious ? 112 : 98) * scale;
+    if (personalBest) text("최고 기록", scoreX, scoreY - 53 * scale, { size: 14 * scale, color: "#e8c777", weight: 750, align: "center" });
+    const shownScore = Math.round(score * easeOutCubic(clamp((enterT - 0.16) / 0.65, 0, 1))).toLocaleString("ko-KR");
+    text(shownScore, scoreX, scoreY, {
+      size: fitTextSize(shownScore, (spacious ? 56 : 50) * scale, scoreWidth, { weight: 900, minSize: 20 * scale }),
+      color: "#fff0ca", weight: 900, align: "center",
+    });
+    text(`스테이지 ${stage}`, scoreX, scoreY + 30 * scale, { size: 16 * scale, color: "#c0d4e1", weight: 700, align: "center" });
+    let summaryY = wide ? recordTop + Math.max(0, (recordH - summaryHeight) / 2) : recordTop + recordH + 12 * scale;
+    let settlementBox = null;
+    if (hasSettlement) {
+      settlementBox = resultsSettlement({ x: sideX, y: summaryY, w: sideW, h: settlementHeight },
+        { earnedShards, bankBefore, bankAfter, returnedTickets, failed: settlementFailed }, scale, landscape);
+      summaryY += settlementHeight;
+    }
+    const newWeapons = [];
+    if (rewardWeapons.length) {
+      summaryY += 12 * scale;
+      const gap = 8 * scale;
+      const rewardWidth = (sideW - gap * (rewardColumns - 1)) / rewardColumns;
+      rewardWeapons.forEach((item, index) => {
+        const box = { x: sideX + (index % rewardColumns) * (rewardWidth + gap), y: summaryY + Math.floor(index / rewardColumns) * rewardRowHeight, w: rewardWidth, h: 44 * scale };
+        const reward = resultsWeaponReward(item, box, scale, settlementFailed, focusId === `results:newWeapon:${item.id}`);
+        if (reward) newWeapons.push(reward);
+      });
+      summaryY += Math.ceil(rewardWeapons.length / rewardColumns) * rewardRowHeight;
+    }
+    let noteBox = null;
+    if (note) {
+      const noteY = summaryY + 23 * scale;
+      const lastY = wrapText(note, sideX + sideW / 2, noteY, sideW - 12 * scale, 14 * scale, "#ffb2a6", 6 * scale, "center", 650);
+      noteBox = { text: note, x: sideX, y: noteY - 14 * scale, w: sideW, h: lastY - noteY + 22 * scale };
+    }
+    ctx.restore();
+    // Canvas clipping does not clip hit rectangles. Trim reward targets to the
+    // content viewport so scrolled-off actions cannot capture footer taps.
+    const clippedHits = hits.splice(contentHitStart).flatMap(hit => {
+      const y = Math.max(contentTop, hit.y);
+      const bottom = Math.min(contentTop + contentAreaHeight, hit.y + hit.h);
+      return bottom > y ? [{ ...hit, y, h: bottom - y }] : [];
+    });
+    hits.push(...clippedHits);
+    if (maxOffset > 0) {
+      const thumbH = Math.max(24 * scale, contentAreaHeight * contentAreaHeight / contentHeight);
+      ctx.fillStyle = "rgba(232,179,75,0.65)";
+      ctx.fillRect(left + contentW - 2 * scale, contentTop + (contentAreaHeight - thumbH) * offset / maxOffset, 2 * scale, thumbH);
+    }
 
-    const achievement = unlocked.length ? `${unlocked.join(" · ")} 새로 해금!`
-      : personalBestStage ? `개인 최고 도달 · 스테이지 ${personalBestStage}` : `이번 최고 콤보 · ${bestCombo}`;
-    text(achievement, cx, 292 * scale, { size: fitTextSize(achievement, 13.5 * scale, 470 * scale), color: "#ffe2a3", align: "center", weight: 900, stroke: true });
-    const note = settlementError || (settlementFailed ? "정산 저장을 완료하지 못했습니다" : "") || saveError || (registered ? "이 기기의 순위표에 기록되었습니다"
-      : profileSaved === true ? "파편과 성장 기록을 이 기기에 저장했습니다" : "이름을 남겨 이 기기의 순위표에 기록하세요");
-    text(note, cx, 311 * scale, { size: fitTextSize(note, 9.5 * scale, 560 * scale), color: settlementFailed || saveError ? "#ffaaaa" : "#9fdcff", align: "center", weight: 750 });
-    const gap = 10 * scale;
-    const primaryW = 188 * scale;
-    const retryW = 270 * scale;
-    const skipW = 154 * scale;
-    const rowW = primaryW + retryW + skipW + gap * 2;
-    const rowLeft = cx - rowW / 2;
-    const primary = outlinedActionButton(rowLeft + primaryW / 2, 348 * scale, primaryW, 44 * scale,
-      settlementFailed ? "정산 다시 시도" : registered ? "순위표 보기" : "이름 남기고 기록",
-      settlementFailed ? "results:retrySave" : "results:primary", { selected: settlementFailed, danger: settlementFailed, scale, fontSize: 11.5 });
-    const retry = outlinedActionButton(rowLeft + primaryW + gap + retryW / 2, 348 * scale, retryW, 44 * scale, "같은 준비로 재도전", "results:retry", { selected: !settlementFailed, disabled: settlementFailed, scale, fontSize: 13 });
-    const skip = outlinedActionButton(rowLeft + primaryW + retryW + gap * 2 + skipW / 2, 348 * scale, skipW, 44 * scale, "모험 준비", "results:skip", { disabled: settlementFailed, scale, fontSize: 11.5 });
+    const actionW = Math.min(contentW, (wide ? 500 : 420) * scale);
+    const gap = 12 * scale;
+    const buttonW = (actionW - gap) / 2;
+    const retry = outlinedActionButton(cx - (buttonW + gap) / 2, actionTop + 26 * scale, buttonW, 52 * scale, "재도전", "results:retry", {
+      selected: focusId === "results:retry", primary: true, disabled: settlementFailed, scale, fontSize: 17,
+    });
+    const newChallenge = outlinedActionButton(cx + (buttonW + gap) / 2, actionTop + 26 * scale, buttonW, 52 * scale, "새도전", "results:newChallenge", {
+      selected: focusId === "results:newChallenge", primary: false, disabled: settlementFailed, scale, fontSize: 17,
+    });
+    const primaryLabel = settlementFailed ? "정산 다시 저장" : registered ? "순위표" : "순위 등록";
+    const primary = outlinedActionButton(cx - (buttonW + gap) / 2, actionTop + 84 * scale, buttonW, 44 * scale, primaryLabel, primaryId, {
+      selected: focusId === primaryId, primary: settlementFailed, danger: settlementFailed, scale, fontSize: 14,
+    });
+    const details = outlinedActionButton(cx + (buttonW + gap) / 2, actionTop + 84 * scale, buttonW, 44 * scale, "상세 기록", "results:details", {
+      selected: focusId === "results:details", primary: false, scale, fontSize: 14,
+    });
     metrics.results = {
+      section,
       hero: heroBox,
-      stats: { x: leftX, y: sideY, w: sideW, h: sideH },
-      settlement: hasSettlement ? {
-        x: rightX, y: sideY, w: sideW, h: sideH,
-        earnedShards: Math.max(0, Number(earnedShards) || 0), bankBefore: Math.max(0, Number(bankBefore) || 0),
-        bankAfter: Math.max(0, Number(bankAfter) || 0), returnedTickets: Math.max(0, Number(returnedTickets) || 0),
-      } : null,
-      achievement: { text: achievement, x: cx - 235 * scale, y: 277 * scale, w: 470 * scale, h: 22 * scale },
-      note: { text: note, x: cx - 280 * scale, y: 299 * scale, w: 560 * scale, h: 20 * scale },
-      actions: { primary, retry, skip },
-      saveError: saveError || settlementError || null,
-      settlementFailed,
-      deathCause,
-      endReason: quit ? "quit" : "death",
-      landscape: true,
+      record: { x: left, y: recordTop, w: recordW, h: recordH },
+      stats: null,
+      settlement: settlementBox,
+      achievement: personalBest ? { text: "최고 기록", x: scoreX - scoreWidth / 2, y: scoreY - 69 * scale, w: scoreWidth, h: 22 * scale } : null,
+      note: noteBox,
+      newWeapon: newWeapons[0] || null, newWeapons,
+      actions: { primary, retry, newChallenge, details, back: null, newWeapon: newWeapons[0]?.action || null },
+      scroll: { x: left, y: contentTop, w: contentW, h: contentAreaHeight, offset, maxOffset, contentHeight, rowHeight: rewardRowHeight },
+      focusOrder, focusedIndex: focusOrder.indexOf(focusId),
+      saveError: settlementError || saveError || null, settlementFailed, deathCause, endReason: quit ? "quit" : "death", landscape,
     };
   }
 
   // === results ===
-  function drawResults({
-    score,
-    bestCombo,
-    floors,
-    stage,
-    weapon,
-    weaponId,
-    attacks,
-    skills,
-    unlocked = [],
-    registered,
-    enterT,
-    saveError = "",
-    profileSaved = null,
-    personalBest = false,
-    personalBestStage = null,
-    deathCause = "contact",
-    endReason = "death",
-    earnedShards = null,
-    bankBefore = null,
-    bankAfter = null,
-    returnedTickets = null,
-    settlementError = "",
-  }) {
+  function drawResults(data) {
     if (isShortLandscape()) {
-      drawResultsLandscape({
-        score, bestCombo, floors, stage, weapon, weaponId, attacks, skills, unlocked, registered, enterT,
-        saveError, profileSaved, personalBest, personalBestStage, deathCause, endReason, earnedShards,
-        bankBefore, bankAfter, returnedTickets, settlementError,
-      });
+      drawResultsLandscape(data);
       return;
     }
-    const bounds = safeBounds();
-    const cx = bounds.cx;
-    const mobile = isMobileLayout();
-    const scale = Math.min(mobile ? sceneUiScale() : screenUiScale() * 0.86, H / (mobile ? 780 : 680));
-    const contentW = Math.min(bounds.width - 36 * scale, 530 * scale);
-    const statsW = mobile ? contentW : contentW * 0.59;
-    const statsLeft = mobile ? cx - statsW / 2 : cx - contentW / 2;
-    const statsTop = 219 * scale;
-    const quit = ["quit", "manual", "abandoned", "exit"].includes(endReason);
-    const hasSettlement = earnedShards !== null || bankAfter !== null || bankBefore !== null || returnedTickets !== null;
-    const settlementFailed = Boolean(settlementError) || (hasSettlement && profileSaved === false);
-    let heroBox = null;
-    const hero = sprites[`motion_${weaponId}_hurt_v1`];
-    if (hero) {
-      const frame = 7;
-      const sourceX = (frame % 4) * 480;
-      const sourceY = Math.floor(frame / 4) * 528;
-      const drawH = (hasSettlement ? mobile ? 138 : 154 : mobile ? 188 : 224) * scale;
-      const drawW = drawH * 480 / 528;
-      const heroX = mobile ? cx - drawW / 2 : cx + contentW * 0.31 - drawW / 2;
-      const heroY = hasSettlement ? (mobile ? 387 : 340) * scale : mobile ? 330 * scale : 197 * scale;
-      heroBox = { x: heroX, y: heroY, w: drawW, h: drawH };
-      ctx.save();
-      ctx.imageSmoothingEnabled = true;
-      ctx.globalAlpha = clamp(enterT / 0.45, 0, 1);
-      ctx.drawImage(
-        hero,
-        sourceX,
-        sourceY,
-        480,
-        528,
-        heroX,
-        heroY,
-        drawW,
-        drawH,
-      );
-      ctx.restore();
-    }
-    text("이번 모험", cx, 56 * scale, { size: 28 * scale, color: TEXT, font: SERIF, weight: 800, align: "center", spacing: 6 * scale });
-    ornament(cx, 76 * scale, 110 * scale);
-
-    const verdict = quit ? "모험 종료" : "사망";
-    const flavor = quit ? "획득한 파편을 챙겨 돌아왔다"
-      : deathCause === "debris" ? "보스의 잔해에 맞아 쓰러졌다" : "몬스터에게 짓눌렸다";
-    if (enterT > 0.15) {
-      const k = clamp((enterT - 0.15) / 0.25, 0, 1);
-      ctx.save();
-      ctx.globalAlpha = k;
-      text(`${verdict} · ${flavor}`, cx, 108 * scale, { size: 11.5 * scale, color: quit ? "#bfeeff" : "#ffacac", align: "center" });
-      ctx.restore();
-    }
-
-    const shownScore = Math.round(score * easeOutCubic(clamp((enterT - 0.36) / 0.7, 0, 1)));
-    text(personalBest ? "개인 최고 기록" : "이번 점수", cx, 143 * scale, { size: 11 * scale, color: personalBest ? "#ffe2a3" : MUTED, align: "center", weight: 800 });
-    text(shownScore.toLocaleString(), cx, 184 * scale, { size: 38 * scale, color: GOLD, weight: 900, align: "center" });
-
-    const allStats = [
-      ["무기", weapon || "장검"],
-      ["도달", `스테이지 ${stage}`],
-      ["최대 콤보", String(bestCombo)],
-      ["붕괴", `${floors}줄`],
-      ["공격", `${attacks || 0}회`],
-      ["기술", `${skills || 0}회`],
-    ];
-    const stats = hasSettlement && mobile ? allStats.slice(0, 4) : allStats;
-    const colW = statsW / (mobile ? 2 : 1);
-    stats.forEach(([label, value], i) => {
-      const at = 0.4 + i * 0.12;
-      if (enterT < at) return;
-      const k = clamp((enterT - at) / 0.2, 0, 1);
-      const col = mobile ? i % 2 : 0;
-      const row = mobile ? Math.floor(i / 2) : i;
-      const x = statsLeft + col * colW;
-      const y = statsTop + row * (mobile ? 37 : 32) * scale;
-      ctx.save();
-      ctx.globalAlpha = k;
-      text(label, x + 8 * scale, y, { size: 10.5 * scale, color: MUTED, weight: 800 });
-      text(value, x + colW - 8 * scale, y, { size: (mobile ? 12.5 : 14) * scale, color: TEXT, weight: 800, align: "right" });
-      ctx.strokeStyle = "rgba(236,230,244,0.18)";
-      ctx.beginPath();
-      ctx.moveTo(x + 8 * scale, y + 10 * scale);
-      ctx.lineTo(x + colW - 8 * scale, y + 10 * scale);
-      ctx.stroke();
-      ctx.restore();
-    });
-
-    let settlementBox = null;
-    if (hasSettlement) {
-      const settlementX = mobile ? statsLeft : statsLeft + statsW + 12 * scale;
-      const settlementY = mobile ? statsTop + 82 * scale : statsTop - 14 * scale;
-      const settlementW = mobile ? statsW : contentW - statsW - 12 * scale;
-      const settlementH = (mobile ? 78 : 122) * scale;
-      panel(settlementX, settlementY, settlementW, settlementH, { alpha: 0.62, border: "rgba(143,227,255,0.48)", radius: 9 * scale });
-      text("파편 정산", settlementX + 14 * scale, settlementY + 23 * scale, { size: (mobile ? 12.5 : 15) * scale, color: "#bfeeff", font: SERIF, weight: 900 });
-      if (mobile) {
-        text(`이번 +${Math.max(0, Number(earnedShards) || 0).toLocaleString("ko-KR")}`, settlementX + 14 * scale, settlementY + 49 * scale, { size: 11.5 * scale, color: TEXT, weight: 850 });
-        text(`보관 ${Math.max(0, Number(bankBefore) || 0).toLocaleString("ko-KR")} → ${Math.max(0, Number(bankAfter) || 0).toLocaleString("ko-KR")}`, settlementX + settlementW - 14 * scale, settlementY + 49 * scale, { size: 11.5 * scale, color: "#bcebb6", weight: 900, align: "right" });
-        if (Math.max(0, Number(returnedTickets) || 0) > 0) text(`미사용 리롤권 +${Math.max(0, Number(returnedTickets) || 0)} 반환`, settlementX + settlementW / 2, settlementY + 68 * scale, { size: 9.5 * scale, color: "#ffe2a3", weight: 800, align: "center" });
-      } else {
-        const rows = [
-          ["이번 획득", `+${Math.max(0, Number(earnedShards) || 0).toLocaleString("ko-KR")}`],
-          ["정산 전", Math.max(0, Number(bankBefore) || 0).toLocaleString("ko-KR")],
-          ["정산 후", Math.max(0, Number(bankAfter) || 0).toLocaleString("ko-KR")],
-          ["권 반환", `+${Math.max(0, Number(returnedTickets) || 0)}`],
-        ];
-        rows.forEach(([label, value], i) => {
-          const y = settlementY + (47 + i * 19) * scale;
-          text(label, settlementX + 14 * scale, y, { size: 9.5 * scale, color: MUTED, weight: 750 });
-          text(value, settlementX + settlementW - 14 * scale, y, { size: 10.5 * scale, color: i === 2 ? "#bcebb6" : TEXT, weight: 900, align: "right" });
-        });
-      }
-      settlementBox = {
-        x: settlementX, y: settlementY, w: settlementW, h: settlementH,
-        earnedShards: Math.max(0, Number(earnedShards) || 0),
-        bankBefore: Math.max(0, Number(bankBefore) || 0),
-        bankAfter: Math.max(0, Number(bankAfter) || 0),
-        returnedTickets: Math.max(0, Number(returnedTickets) || 0),
-      };
-    }
-
-    if (enterT > 1.0) {
-      const achievement = unlocked.length ? `${unlocked.join(" · ")} 새로 해금!`
-        : personalBestStage ? `개인 최고 도달 · 스테이지 ${personalBestStage}`
-          : `이번 최고 콤보 · ${bestCombo}`;
-      const achievementY = H - (mobile ? 238 : 224) * scale;
-      text(achievement, cx, achievementY, { size: fitTextSize(achievement, 16 * scale, contentW), color: "#ffe2a3", align: "center", weight: 900, stroke: true });
-      const note = settlementError || (settlementFailed ? "정산 저장을 완료하지 못했습니다" : "") || saveError || (registered ? "이 기기의 순위표에 기록되었습니다"
-        : profileSaved === true ? hasSettlement ? "파편과 성장 기록을 이 기기에 저장했습니다" : "이 기기에 성장 기록이 저장되었습니다" : "이름을 남겨 이 기기의 순위표에 기록하세요");
-      const noteY = H - (mobile ? 202 : 183) * scale;
-      wrapText(note, cx, noteY, contentW, 11 * scale, settlementFailed || saveError ? "#ffaaaa" : "#9fdcff", 5 * scale, "center", 750);
-      const primaryLabel = settlementFailed ? "정산 다시 시도" : registered ? "순위표 보기" : "이름 남기고 기록";
-      const primaryId = settlementFailed ? "results:retrySave" : "results:primary";
-      let primaryBox;
-      let retryBox;
-      let skipBox;
-      if (mobile) {
-        retryBox = outlinedActionButton(cx, H - 134 * scale, 232 * scale, 54 * scale, hasSettlement ? "같은 준비로 재도전" : "같은 무기로 재도전", "results:retry", { selected: !settlementFailed, disabled: settlementFailed, scale, fontSize: 12.5 });
-        primaryBox = outlinedActionButton(cx - 91 * scale, H - 78 * scale, 166 * scale, 52 * scale, primaryLabel, primaryId, { selected: settlementFailed, danger: settlementFailed, scale, fontSize: 10.5 });
-        skipBox = outlinedActionButton(cx + 91 * scale, H - 78 * scale, 126 * scale, 52 * scale, hasSettlement ? "모험 준비" : "타이틀로", "results:skip", { disabled: settlementFailed, scale, fontSize: 10.5 });
-      } else {
-        primaryBox = outlinedActionButton(cx - 210 * scale, H - 78 * scale, 184 * scale, 44 * scale, primaryLabel, primaryId, { selected: settlementFailed, danger: settlementFailed, scale, fontSize: 11.5 });
-        retryBox = outlinedActionButton(cx, H - 78 * scale, 214 * scale, 46 * scale, hasSettlement ? "같은 준비로 재도전" : "같은 무기로 재도전", "results:retry", { selected: !settlementFailed, disabled: settlementFailed, scale, fontSize: 12.5 });
-        skipBox = outlinedActionButton(cx + 198 * scale, H - 78 * scale, 142 * scale, 44 * scale, hasSettlement ? "모험 준비" : "타이틀로", "results:skip", { disabled: settlementFailed, scale, fontSize: 11.5 });
-      }
-      keyHint(settlementFailed ? [
-        { k: ["J"], t: "정산 다시 시도" },
-      ] : [
-        { k: ["J"], t: registered ? "순위표" : "순위 등록" },
-        { k: ["L"], t: "재도전" },
-        { k: ["K"], t: hasSettlement ? "모험 준비" : "타이틀" },
-      ], H - 28 * baseUiScale());
-      metrics.results = {
-        hero: heroBox,
-        stats: { x: statsLeft, y: statsTop - 14 * scale, w: statsW, h: (mobile ? (hasSettlement ? 72 : 103) : 184) * scale },
-        settlement: settlementBox,
-        achievement: { text: achievement, x: cx - contentW / 2, y: achievementY - 19 * scale, w: contentW, h: 24 * scale },
-        note: { text: note, x: cx - contentW / 2, y: noteY - 12 * scale, w: contentW, h: 38 * scale },
-        actions: { primary: primaryBox, retry: retryBox, skip: skipBox },
-        saveError: settlementError || saveError || null,
-        settlementFailed,
-        deathCause,
-        endReason: quit ? "quit" : "death",
-        landscape: false,
-      };
-    }
+    drawResultsComposition(data);
   }
 
   // === ranking board ===
-  function rankingEndReasonLabel(reason) {
-    if (["quit", "manual", "abandoned", "exit"].includes(reason)) return "도중 종료";
-    if (reason === "death_debris") return "잔해 사망";
-    if (reason === "death_contact") return "접촉 사망";
-    if (typeof reason === "string" && reason.startsWith("death")) return "사망";
-    return "종료 사유 미상";
-  }
-
-  function rankingRowMeta(entry) {
-    const rawVersion = entry?.rulesVersion;
-    const hasGrowthRules = rawVersion !== undefined
-      && rawVersion !== null
-      && rawVersion !== ""
-      && Number.isFinite(Number(rawVersion));
-    if (!hasGrowthRules) {
-      return {
-        text: "이전 규칙",
-        legacy: true,
-        rulesVersion: null,
-        growthLevels: null,
-        endReason: null,
-      };
+  function rankingFitName(value, maxWidth, size, weight) {
+    const chars = Array.from(String(value || "무명"));
+    let label = chars.join("");
+    while (chars.length > 1 && measureTextWidth(label, { size, weight }) > maxWidth) {
+      chars.pop();
+      label = chars.join("") + "…";
     }
-    const level = value => Math.max(0, Math.floor(Number(value) || 0));
-    const growthLevels = {
-      maxHp: level(entry?.growthLevels?.maxHp),
-      maxGuard: level(entry?.growthLevels?.maxGuard),
-    };
-    const endReason = rankingEndReasonLabel(entry?.endReason);
-    return {
-      text: `성장 체력 ${growthLevels.maxHp}단 · 방어 ${growthLevels.maxGuard}단 · ${endReason}`,
-      legacy: false,
-      rulesVersion: Number(rawVersion),
-      growthLevels,
-      endReason,
-    };
+    return label;
   }
 
-  function drawRankingLandscape({ entries, highlight, enterT }) {
-    const bounds = shortLandscapeBounds(780);
-    const cx = bounds.cx;
+  function drawRankingLandscape(data) {
+    drawRankingComposition(data, true);
+  }
+
+  function drawRankingComposition({ entries = [], highlight, enterT = 0, scrollOffset = 0 }, landscape = false) {
+    const bounds = landscape ? shortLandscapeBounds(700) : safeBounds();
     const scale = baseUiScale();
-    text("이 기기의 순위표", cx, 28 * scale, { size: 23 * scale, color: TEXT, font: SERIF, weight: 900, align: "center", spacing: 3 * scale });
-    text("현재 브라우저에 저장된 모험 기록 · 성장 단계와 종료 사유", cx, 48 * scale, {
-      size: 9.5 * scale, color: MUTED, align: "center", weight: 650,
+    const compact = bounds.width / scale < 500;
+    const short = H / scale < 650;
+    const cx = bounds.cx;
+    const contentW = Math.min(bounds.width - (landscape ? 0 : 32) * scale, 700 * scale);
+    const left = cx - contentW / 2;
+    resultsSceneShade();
+    ctx.fillStyle = "rgba(7,13,34,0.22)";
+    ctx.fillRect(0, 0, W, H);
+    const titleY = (landscape ? 35 : short ? 43 : 54) * scale;
+    text("순위표", cx, titleY, {
+      size: (landscape ? 24 : 28) * scale, color: "#fff2c8", font: SERIF, weight: 900, align: "center", spacing: 2 * scale,
     });
-    ornament(cx, 58 * scale, 108 * scale);
-
-    const columnGap = 14 * scale;
-    const columnW = (bounds.width - columnGap) / 2;
-    const headerY = 76 * scale;
-    const rowsTop = 83 * scale;
-    const rowPitch = 42 * scale;
-    const rowH = 38 * scale;
-    const visibleEntries = entries.slice(0, 10);
+    const rowsTop = (landscape ? 87 : short ? 108 : 124) * scale;
+    const backY = H - (landscape ? 40 : 48) * scale;
+    const availableH = Math.max(48 * scale, backY - 49 * scale - rowsTop);
+    const rowH = (landscape ? 48 : clamp(availableH / scale / 10, 48, 58)) * scale;
+    const boardEntries = entries.slice(0, 10);
+    const contentHeight = boardEntries.length * rowH;
+    const listH = Math.min(availableH, Math.max(rowH, contentHeight));
+    const maxOffset = contentHeight - listH > 0.001 ? contentHeight - listH : 0;
+    const offset = clamp(Number(scrollOffset) || 0, 0, maxOffset);
+    const scroll = { x: left, y: rowsTop, w: contentW, h: listH, offset, maxOffset, contentHeight, rowHeight: rowH };
+    const rankX = left + 22 * scale;
+    const nameX = left + 53 * scale;
+    const scoreX = left + contentW - 14 * scale;
+    const headerY = rowsTop - 18 * scale;
+    const headers = [
+      { label: "순위", x: left, y: headerY - 10 * scale, w: 44 * scale, h: 20 * scale },
+      { label: "이름", x: nameX, y: headerY - 10 * scale, w: contentW - 170 * scale, h: 20 * scale },
+      { label: "점수", x: scoreX - 100 * scale, y: headerY - 10 * scale, w: 100 * scale, h: 20 * scale },
+    ];
+    text("순위", rankX, headerY, { size: 14 * scale, color: MUTED, weight: 650, align: "center", baseline: "middle" });
+    text("이름", nameX, headerY, { size: 14 * scale, color: MUTED, weight: 650, baseline: "middle" });
+    text("점수", scoreX, headerY, { size: 14 * scale, color: MUTED, weight: 650, align: "right", baseline: "middle" });
+    ctx.fillStyle = "rgba(232,179,75,0.45)";
+    ctx.fillRect(left, rowsTop - scale, contentW, scale);
     const rows = [];
-    const headers = [];
-
-    for (let columnIndex = 0; columnIndex < 2; columnIndex += 1) {
-      const columnLeft = bounds.left + columnIndex * (columnW + columnGap);
-      const columnRight = columnLeft + columnW;
-      const col = {
-        rank: columnLeft + 19 * scale,
-        name: columnLeft + 38 * scale,
-        weapon: columnRight - 126 * scale,
-        stage: columnRight - 72 * scale,
-        score: columnRight - 10 * scale,
-      };
-      const headerSize = 9 * scale;
-      text("순위", col.rank, headerY, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "center" });
-      text("이름", col.name, headerY, { size: headerSize, color: "rgba(190,202,224,0.78)" });
-      text("무기", col.weapon, headerY, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "right" });
-      text("도달", col.stage, headerY, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "right" });
-      text("점수", col.score, headerY, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "right" });
-      headers.push({ x: columnLeft, y: headerY - 12 * scale, w: columnW, h: 15 * scale });
-
-      for (let localIndex = 0; localIndex < 5; localIndex += 1) {
-        const i = columnIndex * 5 + localIndex;
-        const entry = visibleEntries[i];
-        if (!entry) continue;
-        const at = 0.1 + i * 0.06;
-        if (enterT < at) continue;
-        const k = clamp((enterT - at) / 0.18, 0, 1);
-        const y = rowsTop + localIndex * rowPitch;
-        const mine = i === highlight;
-        const meta = rankingRowMeta(entry);
-        const name = String(entry.name || "무명");
-        const weapon = String(entry.weapon || "—");
-        const stage = String(entry.stage ?? "—");
-        const score = String(entry.score ?? 0);
-        ctx.save();
-        ctx.globalAlpha = k;
-        if (mine) panel(columnLeft, y, columnW, rowH, { alpha: 0.4, border: GOLD, radius: 6 * scale });
-        const rankColor = i === 0 ? GOLD : i < 3 ? "#d8c9a0" : MUTED;
-        text(String(i + 1), col.rank, y + 13 * scale, { size: 12 * scale, color: rankColor, weight: 800, align: "center" });
-        text(name, col.name, y + 13 * scale, {
-          size: fitTextSize(name, 11.5 * scale, col.weapon - col.name - 8 * scale, { weight: mine ? 800 : 650, minSize: 8 * scale }),
-          color: mine ? GOLD : TEXT, weight: mine ? 800 : 650,
-        });
-        text(weapon, col.weapon, y + 13 * scale, {
-          size: fitTextSize(weapon, 9.5 * scale, col.stage - col.weapon - 8 * scale, { minSize: 7.5 * scale }),
-          color: MUTED, align: "right",
-        });
-        text(stage, col.stage, y + 13 * scale, { size: 10 * scale, color: "#9fdcff", weight: 750, align: "right" });
-        text(score, col.score, y + 13 * scale, {
-          size: fitTextSize(score, 11.5 * scale, col.score - col.stage - 8 * scale, { weight: 850, minSize: 8 * scale }),
-          color: mine ? GOLD : TEXT, weight: 850, align: "right",
-        });
-        const metaW = columnRight - col.name - 10 * scale;
-        const metaSize = fitTextSize(meta.text, 8.5 * scale, metaW, { weight: 700, minSize: 7 * scale });
-        text(meta.text, col.name, y + 29 * scale, {
-          size: metaSize, color: meta.legacy ? "rgba(190,202,224,0.72)" : "rgba(167,226,255,0.9)", weight: 700,
-        });
-        ctx.restore();
-        rows.push({
-          index: i, x: columnLeft, y, w: columnW, h: rowH,
-          meta: { ...meta, x: col.name, y: y + 18 * scale, w: metaW, h: 14 * scale },
-        });
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, rowsTop, contentW, listH);
+    ctx.clip();
+    for (let i = 0; i < boardEntries.length; i += 1) {
+      const y = rowsTop + i * rowH - offset;
+      if (y + rowH <= rowsTop || y >= rowsTop + listH) continue;
+      const at = 0.1 + i * 0.04;
+      if (enterT < at) continue;
+      const entry = boardEntries[i];
+      const mine = i === highlight;
+      const nameSize = (compact ? 15 : 17) * scale;
+      const scoreBaseSize = (compact ? 16 : 18) * scale;
+      const value = Number(entry.score);
+      const score = Math.max(0, Number.isFinite(value) ? value : 0).toLocaleString("ko-KR");
+      const maxScoreWidth = Math.min(contentW * 0.54, contentW - 130 * scale);
+      const scoreSize = fitTextSize(score, scoreBaseSize, maxScoreWidth, { weight: 850, minSize: 14 * scale });
+      const scoreWidth = Math.max(74 * scale, measureTextWidth(score, { size: scoreSize, weight: 850 }));
+      const nameWidth = scoreX - scoreWidth - nameX - 16 * scale;
+      const name = rankingFitName(entry.name, nameWidth, nameSize, mine ? 850 : 700);
+      ctx.save();
+      ctx.globalAlpha = clamp((enterT - at) / 0.18, 0, 1);
+      ctx.fillStyle = mine ? "rgba(232,179,75,0.12)" : i % 2 === 0 ? "rgba(8,18,40,0.36)" : "rgba(8,18,40,0.20)";
+      ctx.fillRect(left, y, contentW, rowH);
+      if (mine) {
+        ctx.fillStyle = GOLD;
+        ctx.fillRect(left, y + 10 * scale, 2 * scale, rowH - 20 * scale);
       }
+      ctx.fillStyle = "rgba(191,209,233,0.10)";
+      ctx.fillRect(left, y + rowH - scale, contentW, scale);
+      const centerY = y + rowH / 2;
+      text(String(i + 1), rankX, centerY, {
+        size: (compact ? 16 : 18) * scale, color: i === 0 ? GOLD : i < 3 ? "#e4d1a8" : "#aebed6", weight: 850, align: "center", baseline: "middle",
+      });
+      text(name, nameX, centerY, { size: nameSize, color: mine ? "#ffe2a3" : "#f0edf0", weight: mine ? 850 : 700, baseline: "middle" });
+      text(score, scoreX, centerY, { size: scoreSize, color: mine ? "#ffe2a3" : "#f0edf0", weight: 850, align: "right", baseline: "middle" });
+      ctx.restore();
+      const clippedY = Math.max(y, rowsTop);
+      rows.push({ index: i, rank: i + 1, name, score, x: left, y: clippedY, w: contentW, h: Math.min(y + rowH, rowsTop + listH) - clippedY });
     }
-
-    if (!visibleEntries.length) {
-      text("아직 아무도 이름을 남기지 않았다", cx, 178 * scale, { size: 13 * scale, color: MUTED, align: "center" });
+    ctx.restore();
+    if (!boardEntries.length) {
+      text("기록 없음", cx, rowsTop + availableH * 0.45, { size: 16 * scale, color: MUTED, weight: 650, align: "center", baseline: "middle" });
     }
-    const back = outlinedActionButton(cx, H - 56 * scale, 118 * scale, 40 * scale,
-      "타이틀로", "ranking:back", { selected: true, scale, fontSize: 12 });
-    keyHint([{ k: ["J"], t: "타이틀로" }], H - 17 * scale);
-    metrics.ranking = {
-      landscape: true,
-      headers,
-      rows,
-      back,
-    };
+    if (maxOffset > 0) {
+      const thumbH = Math.max(28 * scale, listH * listH / contentHeight);
+      ctx.fillStyle = "rgba(232,179,75,0.55)";
+      ctx.fillRect(left + contentW - 3 * scale, rowsTop + offset / maxOffset * (listH - thumbH), 2 * scale, thumbH);
+    }
+    region(left, rowsTop, contentW, listH, "ranking:list");
+    const back = outlinedActionButton(cx, backY, Math.min(contentW, 238 * scale), 50 * scale,
+      "이전으로", "ranking:back", { selected: true, primary: true, scale, fontSize: 16 });
+    metrics.ranking = { landscape, title: "순위표", headers, rows, totalRows: boardEntries.length, visibleRows: rows.length, scroll, back };
   }
 
-  function drawRanking({ entries, highlight, enterT }) {
+  function drawRanking(data) {
     if (isShortLandscape()) {
-      drawRankingLandscape({ entries, highlight, enterT });
+      drawRankingLandscape(data);
       return;
     }
-    const bounds = safeBounds();
-    const cx = bounds.cx;
-    const scale = sceneUiScale();
-    const mobile = isMobileLayout();
-    text("이 기기의 순위표", cx, 72 * scale, { size: 25 * scale, color: TEXT, font: SERIF, weight: 800, align: "center", spacing: 3 * scale });
-    text("현재 브라우저에 저장된 모험 기록", cx, 99 * scale, { size: 10.5 * scale, color: MUTED, align: "center", weight: 650 });
-    ornament(cx, 109 * scale, 130 * scale);
-
-    // column headers
-    const tableLeft = bounds.left + 22 * scale;
-    const tableRight = bounds.right - 22 * scale;
-    const tableW = tableRight - tableLeft;
-    const col = mobile
-      ? {
-          rank: tableLeft + tableW * 0.05,
-          name: tableLeft + tableW * 0.14,
-          weapon: tableLeft + tableW * 0.62,
-          stage: tableLeft + tableW * 0.78,
-          score: tableRight,
-        }
-      : {
-          rank: cx - 188 * scale,
-          name: cx - 160 * scale,
-          weapon: cx + 42 * scale,
-          stage: cx + 112 * scale,
-          score: cx + 196 * scale,
-        };
-    const headerSize = (mobile ? 9.5 : 10.5) * scale;
-    text("순위", col.rank, 126 * scale, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "center" });
-    text("이름", col.name, 126 * scale, { size: headerSize, color: "rgba(190,202,224,0.78)" });
-    text("무기", col.weapon, 126 * scale, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "right" });
-    text("도달", col.stage, 126 * scale, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "right" });
-    text("점수", col.score, 126 * scale, { size: headerSize, color: "rgba(190,202,224,0.78)", align: "right" });
-
-    if (!entries.length) {
-      text("아직 아무도 이름을 남기지 않았다", cx, 220 * scale, { size: 13.5 * scale, color: MUTED, align: "center" });
-    }
-
-    const rows = [];
-    entries.slice(0, 10).forEach((e, i) => {
-      const at = 0.1 + i * 0.06;
-      if (enterT < at) return;
-      const k = clamp((enterT - at) / 0.18, 0, 1);
-      const y = (138 + i * 36) * scale;
-      const mine = i === highlight;
-      const meta = rankingRowMeta(e);
-      const name = String(e.name || "무명");
-      const weapon = String(e.weapon || "—");
-      const stage = String(e.stage ?? "—");
-      const score = String(e.score ?? 0);
-      ctx.save();
-      ctx.globalAlpha = k;
-      if (mine) {
-        panel(mobile ? tableLeft : cx - 208 * scale, y, mobile ? tableW : 416 * scale, 34 * scale, { alpha: 0.4, border: GOLD, radius: 6 * scale });
-      }
-      const rankColor = i === 0 ? GOLD : i < 3 ? "#d8c9a0" : MUTED;
-      text(String(i + 1), col.rank, y + 13 * scale, { size: (mobile ? 12 : 14) * scale, color: rankColor, weight: 800, align: "center" });
-      text(name, col.name, y + 13 * scale, {
-        size: fitTextSize(name, (mobile ? 11.5 : 13.5) * scale, col.weapon - col.name - 8 * scale, { weight: mine ? 800 : 650, minSize: (mobile ? 8 : 9) * scale }),
-        color: mine ? GOLD : TEXT, weight: mine ? 800 : 650,
-      });
-      text(weapon, col.weapon, y + 13 * scale, {
-        size: fitTextSize(weapon, (mobile ? 9.5 : 11) * scale, col.stage - col.weapon - 8 * scale, { minSize: 7.5 * scale }),
-        color: MUTED, align: "right",
-      });
-      text(stage, col.stage, y + 13 * scale, { size: (mobile ? 10 : 11.5) * scale, color: "#9fdcff", weight: 700, align: "right" });
-      text(score, col.score, y + 13 * scale, {
-        size: fitTextSize(score, (mobile ? 11.5 : 13.5) * scale, col.score - col.stage - 8 * scale, { weight: 800, minSize: (mobile ? 8 : 9) * scale }),
-        color: mine ? GOLD : TEXT, weight: 800, align: "right",
-      });
-      const metaW = tableRight - col.name;
-      text(meta.text, col.name, y + 28 * scale, {
-        size: fitTextSize(meta.text, (mobile ? 8.5 : 9.5) * scale, metaW, { weight: 700, minSize: 7 * scale }),
-        color: meta.legacy ? "rgba(190,202,224,0.72)" : "rgba(167,226,255,0.9)", weight: 700,
-      });
-      ctx.restore();
-      rows.push({
-        index: i, x: mobile ? tableLeft : cx - 208 * scale, y, w: mobile ? tableW : 416 * scale, h: 34 * scale,
-        meta: { ...meta, x: col.name, y: y + 17 * scale, w: metaW, h: 14 * scale },
-      });
-    });
-
-    const back = outlinedActionButton(cx, H - 72 * scale, 118 * scale, 40 * scale,
-      "타이틀로", "ranking:back", { selected: true, scale, fontSize: 12 });
-    keyHint([{ k: ["J"], t: "타이틀로" }], H - 26 * baseUiScale());
-    metrics.ranking = {
-      landscape: false,
-      headers: [{ x: tableLeft, y: 113 * scale, w: tableW, h: 17 * scale }],
-      rows,
-      back,
-    };
+    drawRankingComposition(data);
   }
 
   function vignette() {
@@ -3333,6 +3010,7 @@ export function createUi(ctx, sprites = {}, forgeAtlas = null, uiAtlas = null, c
   return {
     beginFrame,
     hitAt,
+    setPointer,
     drawHud,
     drawTitle,
     drawPreparation,

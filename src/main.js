@@ -207,31 +207,69 @@ function createNameEntry() {
   const overlay = document.querySelector("#name-overlay");
   const field = document.querySelector("#name-field");
   const submit = document.querySelector("#name-submit");
+  const cancel = document.querySelector("#name-cancel");
+  const shell = document.querySelector(".shell");
   let done = null;
+  let returnFocus = null;
+  let shellWasInert = false;
+
+  function fitVisibleViewport() {
+    if (overlay.hidden) return;
+    const viewport = window.visualViewport;
+    overlay.style.height = `${viewport?.height || window.innerHeight}px`;
+    overlay.style.top = `${viewport?.offsetTop || 0}px`;
+  }
 
   function close(value) {
     if (!done) return;
     const cb = done;
     done = null;
+    field.blur();
     overlay.hidden = true;
     overlayOpen = false;
-    cb(value.trim().slice(0, 8));
+    shell.inert = shellWasInert;
+    input.reset();
+    const focusTarget = returnFocus?.isConnected && returnFocus !== document.body ? returnFocus : canvas;
+    focusTarget.focus({ preventScroll: true });
+    returnFocus = null;
+    // Cancellation is distinct from a deliberately blank (anonymous) entry.
+    cb(value === null ? null : value.trim().slice(0, 8));
   }
   submit.addEventListener("click", () => close(field.value));
-  field.addEventListener("keydown", (e) => {
+  cancel.addEventListener("click", () => close(null));
+  overlay.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === "Enter") close(field.value);
-    if (e.key === "Escape") close("");
+    if (e.key === "Escape") {
+      e.preventDefault();
+      close(null);
+    } else if (e.key === "Enter" && e.target === field && !e.isComposing) {
+      e.preventDefault();
+      close(field.value);
+    } else if (e.key === "Tab") {
+      const focusable = [field, submit, cancel];
+      const index = focusable.indexOf(document.activeElement);
+      e.preventDefault();
+      focusable[(index + (e.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
+    }
   });
-  overlay.addEventListener("keydown", (e) => e.stopPropagation());
+  window.visualViewport?.addEventListener("resize", fitVisibleViewport);
+  window.visualViewport?.addEventListener("scroll", fitVisibleViewport);
+  window.addEventListener("resize", fitVisibleViewport);
 
   return {
     open(cb) {
+      if (done) return;
       done = cb;
+      returnFocus = document.activeElement;
+      shellWasInert = shell.inert;
+      shell.inert = true;
+      input.reset();
       overlayOpen = true;
       overlay.hidden = false;
       field.value = "";
-      setTimeout(() => field.focus(), 30);
+      fitVisibleViewport();
+      // Keep focus in the opening gesture so mobile keyboards can appear.
+      field.focus({ preventScroll: true });
     },
   };
 }
@@ -322,11 +360,16 @@ async function boot() {
     if (event.persisted) window.location.reload();
   });
 
+  let scrollGesture = null;
   canvas.addEventListener("pointerdown", (e) => {
     if (overlayOpen) return;
     unlock();
     const p = canvasPointFromEvent(e);
-    scenes.click(p.x, p.y);
+    scenes.setPointer?.(p.x, p.y, true);
+    if (scenes.canScrollAt?.(p.x, p.y)) {
+      scrollGesture = { id: e.pointerId, startX: e.clientX, startY: e.clientY, lastY: p.y, x: p.x, y: p.y, dragged: false };
+      canvas.setPointerCapture(e.pointerId);
+    } else scenes.click(p.x, p.y);
     e.preventDefault();
   });
 
@@ -336,11 +379,53 @@ async function boot() {
       return;
     }
     const p = canvasPointFromEvent(e);
+    if (scrollGesture?.id === e.pointerId) {
+      if (Math.hypot(e.clientX - scrollGesture.startX, e.clientY - scrollGesture.startY) > 6) scrollGesture.dragged = true;
+      if (scrollGesture.dragged) {
+        scenes.scrollAt(scrollGesture.x, scrollGesture.y, scrollGesture.lastY - p.y);
+        scenes.setPointer?.(-1, -1, false);
+        scenes.render();
+      }
+      scrollGesture.lastY = p.y;
+      e.preventDefault();
+      return;
+    }
+    scenes.setPointer?.(p.x, p.y, e.buttons > 0);
     canvas.style.cursor = scenes.hoverHit(p.x, p.y) ? "pointer" : "";
   });
 
+  canvas.addEventListener("pointerup", (e) => {
+    const p = canvasPointFromEvent(e);
+    if (scrollGesture?.id === e.pointerId) {
+      if (!scrollGesture.dragged && !overlayOpen) scenes.click(p.x, p.y);
+      scrollGesture = null;
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    }
+    scenes.setPointer?.(e.pointerType === "touch" ? -1 : p.x, e.pointerType === "touch" ? -1 : p.y, false);
+  });
+
   canvas.addEventListener("pointerleave", () => {
+    scenes.setPointer?.(-1, -1, false);
     canvas.style.cursor = "";
+  });
+
+  canvas.addEventListener("pointercancel", () => {
+    scrollGesture = null;
+    scenes.setPointer?.(-1, -1, false);
+  });
+  canvas.addEventListener("wheel", (e) => {
+    if (overlayOpen) return;
+    const p = canvasPointFromEvent(e);
+    const rect = canvas.getBoundingClientRect();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1;
+    if (scenes.scrollAt?.(p.x, p.y, e.deltaY * unit * canvas.height / rect.height)) {
+      e.preventDefault();
+      scenes.render();
+    }
+  }, { passive: false });
+  window.addEventListener("pointerup", (e) => {
+    // A dialog can take over between a canvas press and its release.
+    if (e.target !== canvas) scenes.setPointer?.(-1, -1, false);
   });
 
   function stepOnce() {
